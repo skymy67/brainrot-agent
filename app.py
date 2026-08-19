@@ -3,6 +3,7 @@
 
 import chromadb
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -77,6 +78,10 @@ def chat(request: ChatRequest):
     answer = response.text or ""
 
     return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
+
+# Serves static/index.html at "/" — registered after /chat so the API route takes priority.
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
 if __name__ == "__main__":
