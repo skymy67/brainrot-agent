@@ -2,13 +2,27 @@
 """Convert a MediaWiki Special:Export XML dump into wiki_data.json."""
 
 import json
+import re
 import xml.etree.ElementTree as ET
+
+import mwparserfromhell
 
 INPUT_FILE = "Italian+Brainrot+Wiki-20260819145439.xml"
 OUTPUT_FILE = "wiki_data.json"
 BASE_URL = "https://italianbrainrot.wikioasis.org/wiki/"
 MAIN_NAMESPACE = "0"
 MW_NS = "{http://www.mediawiki.org/xml/export-0.11/}"
+
+MAGIC_WORDS_RE = re.compile(r"__[A-Z]+__")
+BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def to_plain_text(wikitext):
+    """Render wikitext down to plain prose, matching the MediaWiki API's explaintext output."""
+    text = mwparserfromhell.parse(wikitext).strip_code()
+    text = MAGIC_WORDS_RE.sub("", text)
+    text = BLANK_LINES_RE.sub("\n\n", text)
+    return text.strip()
 
 
 def parse_pages(path):
@@ -24,12 +38,12 @@ def parse_pages(path):
 
         title = elem.findtext(f"{MW_NS}title")
         revision = elem.find(f"{MW_NS}revision")
-        content = revision.findtext(f"{MW_NS}text") or "" if revision is not None else ""
+        wikitext = revision.findtext(f"{MW_NS}text") or "" if revision is not None else ""
 
         pages.append(
             {
                 "title": title,
-                "content": content,
+                "content": to_plain_text(wikitext),
                 "url": BASE_URL + title.replace(" ", "_"),
             }
         )
