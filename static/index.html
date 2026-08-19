@@ -271,10 +271,11 @@
     document.getElementById("typing-indicator")?.remove();
   }
 
+  let isSending = false;
+
   async function askQuestion(question) {
     addMessage("user", question);
     addTypingIndicator();
-    sendBtn.disabled = true;
 
     try {
       const response = await fetch(CHAT_ENDPOINT, {
@@ -296,15 +297,26 @@
       const wrapper = addMessage("assistant", `Something went wrong: ${err.message}`);
       wrapper.classList.add("error");
     } finally {
+      isSending = false;
+      inputEl.disabled = false;
       sendBtn.disabled = false;
+      sendBtn.textContent = "Send";
       inputEl.focus();
     }
   }
 
   formEl.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (isSending) return;
+
     const question = inputEl.value.trim();
     if (!question) return;
+
+    isSending = true;
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending…";
+
     inputEl.value = "";
     askQuestion(question);
   });
