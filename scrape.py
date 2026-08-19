@@ -47,6 +47,7 @@ def fetch_all_page_titles():
             "list": "allpages",
             "apnamespace": 0,
             "aplimit": "max",
+            "apfilterredir": "nonredirects",
         }
         if apcontinue:
             params["apcontinue"] = apcontinue
@@ -78,6 +79,7 @@ def fetch_page_content(title):
         "action": "query",
         "prop": "extracts|info",
         "explaintext": 1,
+        "redirects": 1,
         "titles": title,
     }
 
