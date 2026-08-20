@@ -46,6 +46,41 @@
     color: var(--muted);
   }
 
+  .mode-toggle {
+    display: inline-flex;
+    margin-top: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px;
+    gap: 3px;
+  }
+
+  .mode-toggle button {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .mode-toggle button.active {
+    background: var(--accent);
+    color: white;
+  }
+
+  .mode-badge {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    padding-left: 2px;
+  }
+
   #chat {
     flex: 1;
     overflow-y: auto;
@@ -183,7 +218,11 @@
 
 <header>
   <h1>Italian Brainrot Wiki Chat</h1>
-  <p>Ask about any character or topic from the wiki. Answers are grounded in retrieved wiki content.</p>
+  <p id="mode-description">Ask about any character or topic from the wiki. Answers are grounded in retrieved wiki content.</p>
+  <div class="mode-toggle" id="mode-toggle" role="radiogroup" aria-label="Chat mode">
+    <button type="button" data-mode="qa" class="active" role="radio" aria-checked="true">Q&amp;A</button>
+    <button type="button" data-mode="creative" role="radio" aria-checked="false">Creative Mode</button>
+  </div>
 </header>
 
 <div id="chat">
@@ -200,11 +239,44 @@
 <script>
   const CHAT_ENDPOINT = "/chat";
 
+  const MODES = {
+    qa: {
+      label: "Q&A",
+      description: "Ask about any character or topic from the wiki. Answers are grounded in retrieved wiki content.",
+      placeholder: "Ask a question…",
+    },
+    creative: {
+      label: "Creative",
+      description: "Ask for a story, scene, or dialogue. Uses the wiki as canon, but the model can fill in the gaps.",
+      placeholder: "Ask for a story…",
+    },
+  };
+
   const chatEl = document.getElementById("chat");
   const formEl = document.getElementById("chat-form");
   const inputEl = document.getElementById("question-input");
   const sendBtn = document.getElementById("send-btn");
   const emptyState = document.getElementById("empty-state");
+  const modeToggleEl = document.getElementById("mode-toggle");
+  const modeDescriptionEl = document.getElementById("mode-description");
+
+  let currentMode = "qa";
+
+  function setMode(mode) {
+    currentMode = mode;
+    for (const btn of modeToggleEl.querySelectorAll("button")) {
+      const isActive = btn.dataset.mode === mode;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-checked", String(isActive));
+    }
+    modeDescriptionEl.textContent = MODES[mode].description;
+    inputEl.placeholder = MODES[mode].placeholder;
+  }
+
+  modeToggleEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-mode]");
+    if (btn) setMode(btn.dataset.mode);
+  });
 
   function scrollToBottom() {
     chatEl.scrollTop = chatEl.scrollHeight;
@@ -221,10 +293,18 @@
     return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   }
 
-  function addMessage(role, text) {
+  function addMessage(role, text, mode) {
     emptyState.remove();
     const wrapper = document.createElement("div");
     wrapper.className = `message ${role}`;
+
+    if (role === "assistant" && mode) {
+      const badge = document.createElement("div");
+      badge.className = "mode-badge";
+      badge.textContent = MODES[mode].label;
+      wrapper.appendChild(badge);
+    }
+
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     if (role === "assistant") {
@@ -274,6 +354,7 @@
   let isSending = false;
 
   async function askQuestion(question) {
+    const mode = currentMode; // capture in case the toggle changes while this request is in flight
     addMessage("user", question);
     addTypingIndicator();
 
@@ -281,7 +362,7 @@
       const response = await fetch(CHAT_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ question, mode }),
       });
 
       if (!response.ok) {
@@ -290,7 +371,7 @@
 
       const data = await response.json();
       removeTypingIndicator();
-      const wrapper = addMessage("assistant", data.answer);
+      const wrapper = addMessage("assistant", data.answer, mode);
       addSources(wrapper, data.sources);
     } catch (err) {
       removeTypingIndicator();
