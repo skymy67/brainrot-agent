@@ -222,6 +222,7 @@
   <div class="mode-toggle" id="mode-toggle" role="radiogroup" aria-label="Chat mode">
     <button type="button" data-mode="qa" class="active" role="radio" aria-checked="true">Q&amp;A</button>
     <button type="button" data-mode="creative" role="radio" aria-checked="false">Creative Mode</button>
+    <button type="button" data-mode="rpg" role="radio" aria-checked="false">RPG Mode</button>
   </div>
 </header>
 
@@ -249,6 +250,11 @@
       label: "Creative",
       description: "Ask for a story, scene, or dialogue. Uses the wiki as canon, but the model can fill in the gaps.",
       placeholder: "Ask for a story…",
+    },
+    rpg: {
+      label: "RPG",
+      description: "Get an RPG character sheet (HP, Speed, Attack, Special Attack, Defense, Special) built from wiki lore.",
+      placeholder: "Enter a character name…",
     },
   };
 

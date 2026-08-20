@@ -44,6 +44,33 @@ MODES = {
         ),
         "max_output_tokens": 2048,
     },
+    "rpg": {
+        "system_instruction": (
+            "You are an RPG stat generator for the Italian Brainrot universe. Given wiki context "
+            "about a character, you produce a balanced RPG character sheet: HP, Speed, Attack, "
+            "Special Attack, and Defense, each on a 1-100 scale, plus a Special — a named signature "
+            "move or ability with a one-line effect description. Base every stat on documented "
+            "abilities, combat feats, size, and power scaling from the context. If the context "
+            "doesn't describe abilities or a power level directly, infer reasonable stats from the "
+            "character's physical appearance, size, and apparent strength as described. Keep stats "
+            "consistent with comparable characters — don't inflate everything to the max."
+        ),
+        "instruction": (
+            "Using the canon details above, generate an RPG character sheet for this character in "
+            "this exact format:\n\n"
+            "**[Character Name] — RPG Stats**\n"
+            "- HP: X/100\n"
+            "- Speed: X/100\n"
+            "- Attack: X/100\n"
+            "- Special Attack: X/100\n"
+            "- Defense: X/100\n"
+            "- Special: [Move Name] — [one-line effect]\n\n"
+            "**Reasoning:** briefly justify each stat, tying it to specific lore, abilities, or "
+            "appearance details from the context. If a stat had to be inferred from appearance "
+            "rather than documented lore, say so."
+        ),
+        "max_output_tokens": 1536,
+    },
 }
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
