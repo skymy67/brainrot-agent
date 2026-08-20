@@ -5,6 +5,7 @@ import chromadb
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
@@ -27,7 +28,8 @@ MODES = {
             "Answer the question using only the context above. "
             "If the context doesn't contain the answer, say so."
         ),
-        "max_output_tokens": 1024,
+        "thinking_budget": 256,
+        "max_output_tokens": 1536,
     },
     "creative": {
         "system_instruction": (
@@ -42,7 +44,8 @@ MODES = {
             "below — you may invent scenes and details not in the wiki as long as they don't "
             "contradict the canon facts provided."
         ),
-        "max_output_tokens": 2048,
+        "thinking_budget": 512,
+        "max_output_tokens": 3072,
     },
     "rpg": {
         "system_instruction": (
@@ -69,7 +72,8 @@ MODES = {
             "appearance details from the context. If a stat had to be inferred from appearance "
             "rather than documented lore, say so."
         ),
-        "max_output_tokens": 1536,
+        "thinking_budget": 512,
+        "max_output_tokens": 2560,
     },
 }
 
@@ -123,15 +127,25 @@ def chat(request: ChatRequest):
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
-    response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=user_message,
-        config=types.GenerateContentConfig(
-            system_instruction=mode["system_instruction"],
-            max_output_tokens=mode["max_output_tokens"],
-        ),
-    )
-    answer = response.text or ""
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=mode["system_instruction"],
+                max_output_tokens=mode["max_output_tokens"],
+                thinking_config=types.ThinkingConfig(thinking_budget=mode["thinking_budget"]),
+            ),
+        )
+    except genai_errors.ClientError as exc:
+        if exc.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API rate limit reached. Wait a bit and try again.",
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+
+    answer = response.text or "The model didn't return a response — try asking again."
 
     return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
