@@ -266,7 +266,34 @@
   const modeToggleEl = document.getElementById("mode-toggle");
   const modeDescriptionEl = document.getElementById("mode-description");
 
+  // Plain fetch() requests are NOT paused by a backgrounded tab — the browser keeps
+  // network I/O running and the response Promise still resolves. What DOES break an
+  // in-flight request is the browser fully discarding the tab (common under memory
+  // pressure with many tabs open, or on mobile): that kills the whole JS context and
+  // silently reloads the page on return, losing the fetch and everything in memory.
+  // sessionStorage survives that reload, so we persist chat state + any in-flight
+  // request and auto-resume on load instead of leaving the UI stuck.
+  const STORAGE_KEY = "brainrotChatState";
+  const MAX_STORED_MESSAGES = 50;
+
   let currentMode = "qa";
+  let messages = [];
+  let pending = null; // { question, mode } while a request is in flight
+
+  function saveState() {
+    sessionStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ mode: currentMode, messages: messages.slice(-MAX_STORED_MESSAGES), pending })
+    );
+  }
+
+  function loadState() {
+    try {
+      return JSON.parse(sessionStorage.getItem(STORAGE_KEY));
+    } catch {
+      return null;
+    }
+  }
 
   function setMode(mode) {
     currentMode = mode;
@@ -277,6 +304,7 @@
     }
     modeDescriptionEl.textContent = MODES[mode].description;
     inputEl.placeholder = MODES[mode].placeholder;
+    saveState();
   }
 
   modeToggleEl.addEventListener("click", (event) => {
@@ -299,45 +327,53 @@
     return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   }
 
-  function addMessage(role, text, mode) {
+  // Pure DOM rendering from a message record — no storage side effects, so it's
+  // safe to reuse both for live messages and for replaying restored history.
+  function renderMessage(record) {
     emptyState.remove();
     const wrapper = document.createElement("div");
-    wrapper.className = `message ${role}`;
+    wrapper.className = `message ${record.role}${record.isError ? " error" : ""}`;
 
-    if (role === "assistant" && mode) {
+    if (record.role === "assistant" && record.mode) {
       const badge = document.createElement("div");
       badge.className = "mode-badge";
-      badge.textContent = MODES[mode].label;
+      badge.textContent = MODES[record.mode].label;
       wrapper.appendChild(badge);
     }
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    if (role === "assistant") {
-      bubble.innerHTML = renderMarkdownLite(text);
+    if (record.role === "assistant") {
+      bubble.innerHTML = renderMarkdownLite(record.text);
     } else {
-      bubble.textContent = text;
+      bubble.textContent = record.text;
     }
     wrapper.appendChild(bubble);
+
+    if (record.sources && record.sources.length > 0) {
+      const sourcesEl = document.createElement("div");
+      sourcesEl.className = "sources";
+      for (const source of record.sources) {
+        const link = document.createElement("a");
+        link.href = source.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = source.title;
+        sourcesEl.appendChild(link);
+      }
+      wrapper.appendChild(sourcesEl);
+    }
+
     chatEl.appendChild(wrapper);
     scrollToBottom();
     return wrapper;
   }
 
-  function addSources(wrapper, sources) {
-    if (!sources || sources.length === 0) return;
-    const sourcesEl = document.createElement("div");
-    sourcesEl.className = "sources";
-    for (const source of sources) {
-      const link = document.createElement("a");
-      link.href = source.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = source.title;
-      sourcesEl.appendChild(link);
-    }
-    wrapper.appendChild(sourcesEl);
-    scrollToBottom();
+  function addMessage(role, text, mode, sources, isError) {
+    const record = { role, text, mode, sources, isError };
+    messages.push(record);
+    saveState();
+    return renderMessage(record);
   }
 
   function addTypingIndicator() {
@@ -359,9 +395,22 @@
 
   let isSending = false;
 
-  async function askQuestion(question) {
-    const mode = currentMode; // capture in case the toggle changes while this request is in flight
-    addMessage("user", question);
+  // Set when the page is navigating away (reload, close, browser-triggered discard).
+  // A pending fetch gets aborted by that navigation and its rejection can still run
+  // on this dying document — without this guard, that rejection handler would clear
+  // the `pending` marker from sessionStorage and race the next document's restore
+  // logic reading that same key, before it ever gets a chance to resume the request.
+  let isUnloading = false;
+  window.addEventListener("pagehide", () => {
+    isUnloading = true;
+  });
+
+  // skipUserMessage: true when resuming a request whose user bubble was already
+  // rendered (and persisted) before a tab discard/reload interrupted it.
+  async function askQuestion(question, mode, skipUserMessage) {
+    if (!skipUserMessage) addMessage("user", question);
+    pending = { question, mode };
+    saveState();
     addTypingIndicator();
 
     try {
@@ -377,18 +426,21 @@
       }
 
       const data = await response.json();
+      if (isUnloading) return; // this document is on its way out — let the next one resume from `pending`
       removeTypingIndicator();
-      const wrapper = addMessage("assistant", data.answer, mode);
-      addSources(wrapper, data.sources);
+      addMessage("assistant", data.answer, mode, data.sources);
     } catch (err) {
+      if (isUnloading) return; // the fetch abort is from navigation, not a real failure — leave `pending` intact
       removeTypingIndicator();
-      const wrapper = addMessage("assistant", `Something went wrong: ${err.message}`);
-      wrapper.classList.add("error");
+      addMessage("assistant", `Something went wrong: ${err.message}`, undefined, undefined, true);
     } finally {
+      if (isUnloading) return;
+      pending = null;
       isSending = false;
       inputEl.disabled = false;
       sendBtn.disabled = false;
       sendBtn.textContent = "Send";
+      saveState();
       inputEl.focus();
     }
   }
@@ -406,8 +458,45 @@
     sendBtn.textContent = "Sending…";
 
     inputEl.value = "";
-    askQuestion(question);
+    askQuestion(question, currentMode, false);
   });
+
+  // Restore chat history (and re-render it) after a normal reload or a browser-triggered
+  // tab discard. If a request was still in flight when the page went away, its user
+  // bubble is already in the restored history — resume it so the answer actually lands
+  // instead of leaving the UI stuck on a message that never got a reply.
+  (function restoreState() {
+    const saved = loadState();
+    if (!saved) return;
+
+    // Restore `messages` before calling setMode() — setMode() calls saveState(),
+    // which would otherwise persist an empty message list and wipe the history
+    // we're about to restore.
+    if (saved.messages && saved.messages.length > 0) {
+      messages = saved.messages;
+      for (const record of messages) renderMessage(record);
+    }
+
+    if (saved.mode && MODES[saved.mode]) setMode(saved.mode);
+
+    if (saved.pending) {
+      isSending = true;
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = "Sending…";
+
+      // A fetch() issued in the very same tick as a fresh navigation can race the
+      // browser's connection teardown from the previous document and fail instantly
+      // with ERR_ABORTED, even though the new page has "loaded". Deferring past the
+      // load event (plus a macrotask tick) lets the page fully settle first.
+      const resume = () => setTimeout(() => askQuestion(saved.pending.question, saved.pending.mode, true), 0);
+      if (document.readyState === "complete") {
+        resume();
+      } else {
+        window.addEventListener("load", resume, { once: true });
+      }
+    }
+  })();
 </script>
 
 </body>
