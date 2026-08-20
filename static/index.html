@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Italian Brainrot Wiki Chat</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e6e8ec;
+    --muted: #8b93a3;
+    --accent: #5b8cff;
+    --user-bubble: #2a3450;
+    --assistant-bubble: #1c2029;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  header p {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .mode-toggle {
+    display: inline-flex;
+    margin-top: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px;
+    gap: 3px;
+  }
+
+  .mode-toggle button {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .mode-toggle button.active {
+    background: var(--accent);
+    color: white;
+  }
+
+  .mode-badge {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    padding-left: 2px;
+  }
+
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  .message {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 85%;
+  }
+
+  .message.user {
+    align-self: flex-end;
+    align-items: flex-end;
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    align-items: flex-start;
+  }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 12px;
+    line-height: 1.5;
+    font-size: 14px;
+    white-space: pre-wrap;
+  }
+
+  .message.user .bubble {
+    background: var(--user-bubble);
+    border-bottom-right-radius: 4px;
+  }
+
+  .message.assistant .bubble {
+    background: var(--assistant-bubble);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+
+  .sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-left: 2px;
+  }
+
+  .sources a {
+    font-size: 12px;
+    color: var(--accent);
+    text-decoration: none;
+    background: rgba(91, 140, 255, 0.1);
+    border: 1px solid rgba(91, 140, 255, 0.25);
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+
+  .sources a:hover {
+    background: rgba(91, 140, 255, 0.2);
+  }
+
+  .error .bubble {
+    background: #3a1e22;
+    border: 1px solid #5a2a30;
+    color: #f2b8bd;
+  }
+
+  .typing {
+    color: var(--muted);
+    font-size: 13px;
+    font-style: italic;
+  }
+
+  form {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    padding: 16px 24px;
+  }
+
+  .input-row {
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex;
+    gap: 8px;
+  }
+
+  input[type="text"] {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 14px;
+    outline: none;
+  }
+
+  input[type="text"]:focus {
+    border-color: var(--accent);
+  }
+
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 0 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .empty-state {
+    margin: auto;
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Italian Brainrot Wiki Chat</h1>
+  <p id="mode-description">Ask about any character or topic from the wiki. Answers are grounded in retrieved wiki content.</p>
+  <div class="mode-toggle" id="mode-toggle" role="radiogroup" aria-label="Chat mode">
+    <button type="button" data-mode="qa" class="active" role="radio" aria-checked="true">Q&amp;A</button>
+    <button type="button" data-mode="creative" role="radio" aria-checked="false">Creative Mode</button>
+  </div>
+</header>
+
+<div id="chat">
+  <div class="empty-state" id="empty-state">Ask a question to get started, e.g. "Who is Tralalero Tralala?"</div>
+</div>
+
+<form id="chat-form">
+  <div class="input-row">
+    <input type="text" id="question-input" placeholder="Ask a question…" autocomplete="off" autofocus />
+    <button type="submit" id="send-btn">Send</button>
+  </div>
+</form>
+
+<script>
+  const CHAT_ENDPOINT = "/chat";
+
+  const MODES = {
+    qa: {
+      label: "Q&A",
+      description: "Ask about any character or topic from the wiki. Answers are grounded in retrieved wiki content.",
+      placeholder: "Ask a question…",
+    },
+    creative: {
+      label: "Creative",
+      description: "Ask for a story, scene, or dialogue. Uses the wiki as canon, but the model can fill in the gaps.",
+      placeholder: "Ask for a story…",
+    },
+  };
+
+  const chatEl = document.getElementById("chat");
+  const formEl = document.getElementById("chat-form");
+  const inputEl = document.getElementById("question-input");
+  const sendBtn = document.getElementById("send-btn");
+  const emptyState = document.getElementById("empty-state");
+  const modeToggleEl = document.getElementById("mode-toggle");
+  const modeDescriptionEl = document.getElementById("mode-description");
+
+  let currentMode = "qa";
+
+  function setMode(mode) {
+    currentMode = mode;
+    for (const btn of modeToggleEl.querySelectorAll("button")) {
+      const isActive = btn.dataset.mode === mode;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-checked", String(isActive));
+    }
+    modeDescriptionEl.textContent = MODES[mode].description;
+    inputEl.placeholder = MODES[mode].placeholder;
+  }
+
+  modeToggleEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-mode]");
+    if (btn) setMode(btn.dataset.mode);
+  });
+
+  function scrollToBottom() {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // Minimal, XSS-safe markdown: escapes everything, then re-enables **bold** only.
+  function renderMarkdownLite(text) {
+    return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  }
+
+  function addMessage(role, text, mode) {
+    emptyState.remove();
+    const wrapper = document.createElement("div");
+    wrapper.className = `message ${role}`;
+
+    if (role === "assistant" && mode) {
+      const badge = document.createElement("div");
+      badge.className = "mode-badge";
+      badge.textContent = MODES[mode].label;
+      wrapper.appendChild(badge);
+    }
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (role === "assistant") {
+      bubble.innerHTML = renderMarkdownLite(text);
+    } else {
+      bubble.textContent = text;
+    }
+    wrapper.appendChild(bubble);
+    chatEl.appendChild(wrapper);
+    scrollToBottom();
+    return wrapper;
+  }
+
+  function addSources(wrapper, sources) {
+    if (!sources || sources.length === 0) return;
+    const sourcesEl = document.createElement("div");
+    sourcesEl.className = "sources";
+    for (const source of sources) {
+      const link = document.createElement("a");
+      link.href = source.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = source.title;
+      sourcesEl.appendChild(link);
+    }
+    wrapper.appendChild(sourcesEl);
+    scrollToBottom();
+  }
+
+  function addTypingIndicator() {
+    emptyState.remove();
+    const wrapper = document.createElement("div");
+    wrapper.className = "message assistant";
+    wrapper.id = "typing-indicator";
+    const bubble = document.createElement("div");
+    bubble.className = "typing";
+    bubble.textContent = "Thinking…";
+    wrapper.appendChild(bubble);
+    chatEl.appendChild(wrapper);
+    scrollToBottom();
+  }
+
+  function removeTypingIndicator() {
+    document.getElementById("typing-indicator")?.remove();
+  }
+
+  let isSending = false;
+
+  async function askQuestion(question) {
+    const mode = currentMode; // capture in case the toggle changes while this request is in flight
+    addMessage("user", question);
+    addTypingIndicator();
+
+    try {
+      const response = await fetch(CHAT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, mode }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      removeTypingIndicator();
+      const wrapper = addMessage("assistant", data.answer, mode);
+      addSources(wrapper, data.sources);
+    } catch (err) {
+      removeTypingIndicator();
+      const wrapper = addMessage("assistant", `Something went wrong: ${err.message}`);
+      wrapper.classList.add("error");
+    } finally {
+      isSending = false;
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = "Send";
+      inputEl.focus();
+    }
+  }
+
+  formEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (isSending) return;
+
+    const question = inputEl.value.trim();
+    if (!question) return;
+
+    isSending = true;
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending…";
+
+    inputEl.value = "";
+    askQuestion(question);
+  });
+</script>
+
+</body>
+</html>
