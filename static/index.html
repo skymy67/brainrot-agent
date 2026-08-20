@@ -168,6 +168,35 @@
     padding: 16px 24px;
   }
 
+  .image-row:not([hidden]) {
+    max-width: 760px;
+    margin: 0 auto 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .image-row label {
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .image-row .filename {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  #image-clear-btn {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    padding: 0;
+    font-size: 12px;
+    font-weight: 400;
+    cursor: pointer;
+  }
+
   .input-row {
     max-width: 760px;
     margin: 0 auto;
@@ -223,6 +252,7 @@
     <button type="button" data-mode="qa" class="active" role="radio" aria-checked="true">Q&amp;A</button>
     <button type="button" data-mode="creative" role="radio" aria-checked="false">Creative Mode</button>
     <button type="button" data-mode="rpg" role="radio" aria-checked="false">RPG Mode</button>
+    <button type="button" data-mode="rarity" role="radio" aria-checked="false">Rarity Mode</button>
   </div>
 </header>
 
@@ -231,6 +261,11 @@
 </div>
 
 <form id="chat-form">
+  <div class="image-row" id="image-row" hidden>
+    <label for="image-input" id="image-label">+ Add reference image (optional)</label>
+    <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp" hidden />
+    <button type="button" id="image-clear-btn" hidden>&times; Remove image</button>
+  </div>
   <div class="input-row">
     <input type="text" id="question-input" placeholder="Ask a question…" autocomplete="off" autofocus />
     <button type="submit" id="send-btn">Send</button>
@@ -256,6 +291,12 @@
       description: "Get an RPG character sheet (HP, Speed, Attack, Special Attack, Defense, Special) built from wiki lore.",
       placeholder: "Enter a character name…",
     },
+    rarity: {
+      label: "Rarity",
+      description: "Get a canonical rarity tier (Common through Celestial, or OG) for any character, built from wiki lore, size/weight, and existing game rarities.",
+      placeholder: "Enter a character name…",
+      showImageUpload: true,
+    },
   };
 
   const chatEl = document.getElementById("chat");
@@ -265,6 +306,10 @@
   const emptyState = document.getElementById("empty-state");
   const modeToggleEl = document.getElementById("mode-toggle");
   const modeDescriptionEl = document.getElementById("mode-description");
+  const imageRowEl = document.getElementById("image-row");
+  const imageLabelEl = document.getElementById("image-label");
+  const imageInputEl = document.getElementById("image-input");
+  const imageClearBtn = document.getElementById("image-clear-btn");
 
   // Plain fetch() requests are NOT paused by a backgrounded tab — the browser keeps
   // network I/O running and the response Promise still resolves. What DOES break an
@@ -295,6 +340,44 @@
     }
   }
 
+  // { base64, mimeType, filename } | null. Not persisted to sessionStorage — a base64
+  // image could be several MB, and stuffing that into the shared `pending` state on every
+  // keystroke-adjacent save risks blowing the ~5-10MB sessionStorage quota. If a tab
+  // discard interrupts a rarity request with an image attached, resume-on-reload retries
+  // without the image; the backend's text-only fallback path handles that gracefully.
+  let selectedImage = null;
+
+  function clearSelectedImage() {
+    selectedImage = null;
+    imageInputEl.value = "";
+    imageLabelEl.textContent = "+ Add reference image (optional)";
+    imageClearBtn.hidden = true;
+  }
+
+  function readImageAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]); // strip the data: URL prefix
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  imageInputEl.addEventListener("change", async () => {
+    const file = imageInputEl.files[0];
+    if (!file) return;
+    try {
+      const base64 = await readImageAsBase64(file);
+      selectedImage = { base64, mimeType: file.type, filename: file.name };
+      imageLabelEl.textContent = file.name;
+      imageClearBtn.hidden = false;
+    } catch {
+      clearSelectedImage();
+    }
+  });
+
+  imageClearBtn.addEventListener("click", clearSelectedImage);
+
   function setMode(mode) {
     currentMode = mode;
     for (const btn of modeToggleEl.querySelectorAll("button")) {
@@ -304,6 +387,8 @@
     }
     modeDescriptionEl.textContent = MODES[mode].description;
     inputEl.placeholder = MODES[mode].placeholder;
+    imageRowEl.hidden = !MODES[mode].showImageUpload;
+    if (!MODES[mode].showImageUpload) clearSelectedImage();
     saveState();
   }
 
@@ -406,8 +491,10 @@
   });
 
   // skipUserMessage: true when resuming a request whose user bubble was already
-  // rendered (and persisted) before a tab discard/reload interrupted it.
-  async function askQuestion(question, mode, skipUserMessage) {
+  // rendered (and persisted) before a tab discard/reload interrupted it. image is
+  // { base64, mimeType } | undefined — never present on a resumed request (see the
+  // note above selectedImage on why images aren't persisted for resume).
+  async function askQuestion(question, mode, skipUserMessage, image) {
     if (!skipUserMessage) addMessage("user", question);
     pending = { question, mode };
     saveState();
@@ -417,7 +504,12 @@
       const response = await fetch(CHAT_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, mode }),
+        body: JSON.stringify({
+          question,
+          mode,
+          image_base64: image?.base64,
+          image_mime_type: image?.mimeType,
+        }),
       });
 
       if (!response.ok) {
@@ -457,8 +549,10 @@
     sendBtn.disabled = true;
     sendBtn.textContent = "Sending…";
 
+    const image = selectedImage;
     inputEl.value = "";
-    askQuestion(question, currentMode, false);
+    clearSelectedImage();
+    askQuestion(question, currentMode, false, image);
   });
 
   // Restore chat history (and re-render it) after a normal reload or a browser-triggered

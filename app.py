@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """FastAPI backend that answers questions via RAG over the Italian Brainrot wiki."""
 
+import base64
+
 import chromadb
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +11,8 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+
+import rarity_mode
 
 CHROMA_DIR = "chroma_db"
 COLLECTION_NAME = "wiki_pages"
@@ -87,6 +91,8 @@ gemini_client = genai.Client()  # reads GEMINI_API_KEY / GOOGLE_API_KEY from the
 class ChatRequest(BaseModel):
     question: str
     mode: str = "qa"
+    image_base64: str | None = None
+    image_mime_type: str | None = None
 
 
 class Source(BaseModel):
@@ -116,10 +122,44 @@ def dedupe_sources(metadatas):
     return sources
 
 
+def handle_gemini_errors(fn):
+    try:
+        return fn()
+    except genai_errors.ClientError as exc:
+        if exc.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API rate limit reached. Wait a bit and try again.",
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
+    if request.mode == "rarity":
+        documents, metadatas = retrieve_chunks(request.question)
+        context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+
+        image_bytes = None
+        if request.image_base64:
+            try:
+                image_bytes = base64.b64decode(request.image_base64)
+            except (base64.binascii.Error, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="Invalid image data.") from exc
+
+        answer = handle_gemini_errors(
+            lambda: rarity_mode.run_rarity_pipeline(
+                gemini_client,
+                request.question,
+                context,
+                image_bytes=image_bytes,
+                image_mime_type=request.image_mime_type,
+            )
+        )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
     if request.mode not in MODES:
-        raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'. Use 'qa' or 'creative'.")
+        raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
     documents, metadatas = retrieve_chunks(request.question)
@@ -127,8 +167,8 @@ def chat(request: ChatRequest):
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
-    try:
-        response = gemini_client.models.generate_content(
+    response = handle_gemini_errors(
+        lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=user_message,
             config=types.GenerateContentConfig(
@@ -137,13 +177,7 @@ def chat(request: ChatRequest):
                 thinking_config=types.ThinkingConfig(thinking_budget=mode["thinking_budget"]),
             ),
         )
-    except genai_errors.ClientError as exc:
-        if exc.code == 429:
-            raise HTTPException(
-                status_code=429,
-                detail="Gemini API rate limit reached. Wait a bit and try again.",
-            ) from exc
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+    )
 
     answer = response.text or "The model didn't return a response — try asking again."
 
