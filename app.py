@@ -125,11 +125,16 @@ def dedupe_sources(metadatas):
 def handle_gemini_errors(fn):
     try:
         return fn()
-    except genai_errors.ClientError as exc:
+    except genai_errors.APIError as exc:
         if exc.code == 429:
             raise HTTPException(
                 status_code=429,
                 detail="Gemini API rate limit reached. Wait a bit and try again.",
+            ) from exc
+        if exc.code == 503:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini is temporarily overloaded. Try again in a moment.",
             ) from exc
         raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
 
