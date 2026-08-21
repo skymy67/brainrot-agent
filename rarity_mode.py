@@ -23,10 +23,17 @@ from pydantic import BaseModel
 # --- Config: easy to extend later ---------------------------------------------------
 
 # Hardcoded OG brainrots — predate the AI-brainrot era. Case-insensitive exact match
-# against the character name. Add more names here as needed.
+# against the character name. Sourced from the Steal a Brainrot Wiki's own OG category
+# (first-party, not a third-party blog list — those proved unreliable during review).
+# Add more names here as needed.
 OG_CHARACTERS = {
     "strawberry elephant",
     "meowl",
+    "smurf cat",
+    "skibidi toilet",
+    "john pork",
+    "headless horseman",
+    "spyder elephant",
 }
 
 # Ordered lowest to highest. OG is intentionally excluded — it's a separate, non-power-based
