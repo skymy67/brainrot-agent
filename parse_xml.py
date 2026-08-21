@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 
 import mwparserfromhell
 
-INPUT_FILE = "Italian+Brainrot+Wiki-20260819145439.xml"
+INPUT_FILE = "Italian+Brainrot+Wiki-20260821163544.xml"
 OUTPUT_FILE = "wiki_data.json"
 BASE_URL = "https://italianbrainrot.wikioasis.org/wiki/"
 MAIN_NAMESPACE = "0"
