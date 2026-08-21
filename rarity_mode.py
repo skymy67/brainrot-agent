@@ -16,6 +16,7 @@ Each non-hardcoded-OG request costs at most 2 Gemini calls.
 import json
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
@@ -286,11 +287,28 @@ def format_score_answer(character_name, result: RarityScoreResult):
 # --- Pipeline entry point ----------------------------------------------------------------
 
 
+def _unavailable_search_result(reason):
+    """Fallback when the search-grounded call itself fails (quota, billing restriction,
+    transient outage) — distinct from a successful call that returns unparseable JSON.
+    Lets the pipeline proceed to scoring instead of failing the whole request, per the
+    spec's 'do not default to random, weight other signals more heavily instead' rule."""
+    return OgAndRaritySearchResult(
+        is_og=False,
+        og_reasoning=f"Could not determine OG status ({reason}).",
+        existing_game_rarity_found=False,
+        existing_game_rarity="",
+        existing_game_rarity_reasoning=f"Existing-rarity search unavailable ({reason}).",
+    )
+
+
 def run_rarity_pipeline(gemini_client, character_name, wiki_context, image_bytes=None, image_mime_type=None):
     if check_hardcoded_og(character_name):
         return format_og_answer(character_name, f"{character_name} is a known OG brainrot — its origin predates the AI-brainrot trend.")
 
-    search_result = run_og_and_rarity_search(gemini_client, character_name, wiki_context)
+    try:
+        search_result = run_og_and_rarity_search(gemini_client, character_name, wiki_context)
+    except genai_errors.APIError as exc:
+        search_result = _unavailable_search_result(f"API error {exc.code}")
 
     if search_result.is_og:
         return format_og_answer(character_name, search_result.og_reasoning)
