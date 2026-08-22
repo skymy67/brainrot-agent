@@ -79,18 +79,34 @@ def _is_excluded_tag(tag):
 
 
 def _load_characters():
+    """Only titles and their (small) tag sets are kept in memory for the process lifetime —
+    holding every page's full content in a second permanent copy (on top of what build_index.py
+    and chroma_db already need in memory to build/serve the RAG index) contributed to an
+    out-of-memory crash on Railway's production instance. Full content is only ever needed for
+    a handful of shortlisted candidates at final-guess time, so it's loaded lazily via
+    _content_for_titles() instead of held permanently."""
     with open(WIKI_DATA_FILE, encoding="utf-8") as f:
         pages = json.load(f)
     titles = [page["title"] for page in pages]
-    content_by_title = {page["title"]: page["content"] for page in pages}
     tags_by_title = {
         page["title"]: {tag.strip() for tag in CATEGORY_RE.findall(page["content"]) if not _is_excluded_tag(tag.strip())}
         for page in pages
     }
-    return titles, content_by_title, tags_by_title
+    return titles, tags_by_title
 
 
-ALL_TITLES, CONTENT_BY_TITLE, TAGS_BY_TITLE = _load_characters()
+ALL_TITLES, TAGS_BY_TITLE = _load_characters()
+
+
+def _content_for_titles(titles):
+    """Re-reads wiki_data.json for just the given titles' content. Called only when making a
+    final guess among a small shortlist (at most MAX_SHORTLIST_FOR_GEMINI candidates), never on
+    the hot path of narrowing the pool — a full JSON parse is an acceptable one-off cost there,
+    much cheaper over the life of the process than holding every page's content in RAM always."""
+    wanted = set(titles)
+    with open(WIKI_DATA_FILE, encoding="utf-8") as f:
+        pages = json.load(f)
+    return {page["title"]: page["content"] for page in pages if page["title"] in wanted}
 
 
 # --- State ---------------------------------------------------------------------------------
@@ -207,8 +223,9 @@ GUESS_SYSTEM_INSTRUCTION = (
 
 def _pick_best_guess(gemini_client, shortlist_titles, history_lines):
     history_summary = "\n".join(history_lines[-10:]) or "(no questions asked yet)"
+    content_by_title = _content_for_titles(shortlist_titles)
     context = "\n\n---\n\n".join(
-        f"[{title}]\n{CONTENT_BY_TITLE.get(title, '')[:CONTENT_TRUNCATE_CHARS]}" for title in shortlist_titles
+        f"[{title}]\n{content_by_title.get(title, '')[:CONTENT_TRUNCATE_CHARS]}" for title in shortlist_titles
     )
     prompt = (
         f"Candidates (choose ONLY one of these, copied exactly):\n"

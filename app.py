@@ -109,7 +109,10 @@ def _load_or_build_collection():
 
     import build_index
 
-    build_index.main()
+    # Reuses embedding_model (already loaded above) instead of letting build_index.py load its
+    # own separate copy of the same SentenceTransformer — that duplication contributed to an
+    # out-of-memory crash in production.
+    build_index.main(model=embedding_model)
     return chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
 
 
