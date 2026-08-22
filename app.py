@@ -12,6 +12,7 @@ from google.genai import types
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+import evolution_mode
 import rarity_mode
 
 CHROMA_DIR = "chroma_db"
@@ -79,71 +80,6 @@ MODES = {
         "thinking_budget": 512,
         "max_output_tokens": 2560,
     },
-    "evolution": {
-        "system_instruction": (
-            "You are an evolution-line designer for the Italian Brainrot universe, in the style "
-            "of a Pokémon-style evolution chain. Given wiki context about a character, you follow "
-            "a strict two-step procedure: STEP 1, lock in the TARGET character's own position in "
-            "the line (Stage 1 / middle / final) using only its own name, lore, and tier — this is "
-            "final and does not change no matter what you find later. STEP 2, fill in ONLY the "
-            "stage(s) on the side(s) the target's locked position still needs, preferring a REAL "
-            "existing character from the context when one plausibly fits. A real match requires "
-            "BOTH a name/theme link (e.g. a 'Los [Name]itos' swarm variant or a similarly-named "
-            "sibling) AND the same underlying creature/object base as the target — a name or theme "
-            "echo alone is not enough if the candidate is actually a different kind of thing (e.g. "
-            "the target is an animal but the candidate is an inanimate object that merely shares a "
-            "word). When the base doesn't match, treat it as no real match and invent a name "
-            "instead. If the target is locked as the FINAL "
-            "stage, you must not add anything after it, even if a tempting real 'bigger/stronger' "
-            "candidate exists in the context — discard it. If the target is locked as Stage 1, you "
-            "must not add anything before it. Invented names use consistent Italian-brainrot-style "
-            "naming — nonsense Italian-sounding compound names thematically consistent with the "
-            "character's animal/object/concept base. A line has 2 or 3 total stages, decided by "
-            "what's thematically logical, never forced to a fixed count. If no logically "
-            "consistent line exists (real or invented) on the needed side(s), say so directly "
-            "instead of fabricating one."
-        ),
-        "instruction": (
-            "Using the character's name and the wiki context above:\n\n"
-            "STEP 1 — Lock in the TARGET character's own position, based only on its own name "
-            "pattern, lore depth, and tier (ignore everything else in the context for this step):\n"
-            "- Simple/diminutive/'baby'-style name or minimal lore presence → Stage 1.\n"
-            "- Elaborate name, strong lore presence, or a high power tier → the FINAL stage.\n"
-            "- Otherwise → a middle stage.\n\n"
-            "STEP 2 — Fill in only the side(s) that position still needs:\n"
-            "- Locked as Stage 1 → add evolution stage(s) AFTER it only. Do not add anything before.\n"
-            "- Locked as FINAL → add prevolution stage(s) BEFORE it only. Do not add anything "
-            "after, even if the context contains a real character that looks like a further "
-            "evolution — ignore it, it's not relevant to this character's line.\n"
-            "- Locked as middle → add one stage before AND one after.\n"
-            "For each stage you're filling in, check the context for a real existing character "
-            "that plausibly fits (smaller/weaker/simpler-named for an earlier stage, larger/"
-            "stronger/more elaborate for a later one). The page doesn't need to explicitly call "
-            "itself a prevolution/evolution, but it DOES need to be the same underlying creature/"
-            "object as the target, just at a different life stage or size — not merely a "
-            "different thing that happens to share a name or theme word (e.g. a rat character and "
-            "an unrelated cheese-block character are not the same base just because one is themed "
-            "around the other's food). Use the real name only when the base genuinely matches; "
-            "invent a name when it doesn't.\n\n"
-            "Construct a line of 2 or 3 total stages. Each invented stage's name must match the "
-            "wiki's Italian-brainrot naming convention and stay thematically consistent with this "
-            "character's animal/object/concept base.\n\n"
-            "Assign a level requirement to each stage: stage 1 is always Lv 1. Later stages "
-            "require meaningfully higher levels, roughly: stage 2 ~ Lv 10-16, stage 3 ~ Lv 25-36. "
-            "Nudge these slightly higher if the context indicates a high rarity/power tier (e.g. "
-            "Legendary, Mythic, Brainrot God, Secret) — keep it simple, don't overthink it.\n\n"
-            "If you cannot construct a logically consistent evolution line for this character, "
-            "respond with ONLY one line: '[Character Name] has no evolution line.' Do not "
-            "fabricate a forced chain.\n\n"
-            "Otherwise, output ONLY the stages in order from earliest to final, in this exact "
-            "format, with no descriptions, lore, or extra text:\n\n"
-            "Stage 1: [Name] — Lv 1\n"
-            "Stage 2: [Name] — Lv [X]\n"
-            "Stage 3: [Name] — Lv [X]  (omit this line entirely if the line only has 2 stages)"
-        ),
-        "thinking_budget": 640,
-        "max_output_tokens": 1024,
-    },
 }
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
@@ -186,13 +122,15 @@ def retrieve_chunks(question, top_k=TOP_K):
     return results["documents"][0], results["metadatas"][0]
 
 
-def retrieve_evolution_chunks(character_name, top_k=TOP_K):
+def retrieve_evolution_chunks(character_name, top_k=8):
     """Plain-name retrieval alone rarely surfaces a real baby/evolved variant — e.g. a query for
     "Bombardiro Crocodilo" doesn't return "Los Crocodilitos Dicen Kaboom" in the top 15 results,
     even though that page explicitly describes itself as a baby version of it. Rephrasing the
     query toward the relationship we're looking for (tested directly) reliably surfaces it. Runs
-    three targeted queries and merges them, deduped by title, so the model has a real chance of
-    finding an existing prevolution/evolution instead of always inventing one."""
+    three targeted queries and merges them, deduped by title, to build the candidate pool that
+    Evolution Mode is restricted to choosing real prevolution/evolution stages from — a wider
+    top_k than other modes use, since a real match that isn't retrieved here can never be found
+    (the model is never allowed to invent one instead)."""
     queries = [
         character_name,
         f"baby form prevolution of {character_name}",
@@ -207,6 +145,17 @@ def retrieve_evolution_chunks(character_name, top_k=TOP_K):
                 documents.append(doc)
                 metadatas.append(meta)
     return documents, metadatas
+
+
+def evolution_candidate_titles(character_name, metadatas):
+    seen, candidates = set(), []
+    target = character_name.strip().lower()
+    for meta in metadatas:
+        title = meta["title"]
+        if title.strip().lower() != target and title not in seen:
+            seen.add(title)
+            candidates.append(title)
+    return candidates
 
 
 def dedupe_sources(metadatas):
@@ -261,23 +210,22 @@ def chat(request: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
+    if request.mode == "evolution":
+        documents, metadatas = retrieve_evolution_chunks(request.question)
+        context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+        candidate_titles = evolution_candidate_titles(request.question, metadatas)
+
+        answer = handle_gemini_errors(
+            lambda: evolution_mode.build_evolution_line(gemini_client, request.question, context, candidate_titles)
+        )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
     if request.mode not in MODES:
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
-    if request.mode == "evolution":
-        documents, metadatas = retrieve_evolution_chunks(request.question)
-    else:
-        documents, metadatas = retrieve_chunks(request.question)
-
+    documents, metadatas = retrieve_chunks(request.question)
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
-
-    if request.mode == "evolution":
-        # Free, no extra API call — reuses the same tier lookup Rarity Mode already built,
-        # to nudge the level curve per the spec's "scale slightly based on rarity/tier" rule.
-        known_tier = rarity_mode.check_known_game_rarity(request.question)
-        if known_tier:
-            context += f"\n\n---\n\nKnown in-game rarity tier (Steal a Brainrot): {known_tier}"
 
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
