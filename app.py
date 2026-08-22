@@ -82,23 +82,42 @@ MODES = {
     "evolution": {
         "system_instruction": (
             "You are an evolution-line designer for the Italian Brainrot universe, in the style "
-            "of a Pokémon-style evolution chain. Given wiki context about a character, you "
-            "determine where it logically sits in an evolution line and invent the missing "
-            "stage(s), using consistent Italian-brainrot-style naming — nonsense Italian-sounding "
-            "compound names that stay thematically consistent with the character's animal/object/"
-            "concept base. A line has 2 or 3 total stages — decide based on what's thematically "
-            "logical for this specific character, never force a fixed count. If no logically "
-            "consistent prevolution or evolution exists, say so directly instead of fabricating "
-            "a forced chain."
+            "of a Pokémon-style evolution chain. Given wiki context about a character, you follow "
+            "a strict two-step procedure: STEP 1, lock in the TARGET character's own position in "
+            "the line (Stage 1 / middle / final) using only its own name, lore, and tier — this is "
+            "final and does not change no matter what you find later. STEP 2, fill in ONLY the "
+            "stage(s) on the side(s) the target's locked position still needs, preferring a REAL "
+            "existing character from the context when one plausibly fits (even without an "
+            "explicitly stated prevolution/evolution relationship — a clear name/theme match, like "
+            "a 'Los [Name]itos' swarm variant or a similarly-named sibling, is reason enough); "
+            "invent a name only when no such match exists. If the target is locked as the FINAL "
+            "stage, you must not add anything after it, even if a tempting real 'bigger/stronger' "
+            "candidate exists in the context — discard it. If the target is locked as Stage 1, you "
+            "must not add anything before it. Invented names use consistent Italian-brainrot-style "
+            "naming — nonsense Italian-sounding compound names thematically consistent with the "
+            "character's animal/object/concept base. A line has 2 or 3 total stages, decided by "
+            "what's thematically logical, never forced to a fixed count. If no logically "
+            "consistent line exists (real or invented) on the needed side(s), say so directly "
+            "instead of fabricating one."
         ),
         "instruction": (
-            "Using the character's name and the wiki context above, determine where this brainrot "
-            "would logically sit in an evolution line:\n"
-            "- Simple/diminutive/'baby'-style name or minimal lore presence → treat it as Stage 1 "
-            "and invent the evolution(s) that follow.\n"
-            "- Elaborate name, strong lore presence, or a high power tier → treat it as the FINAL "
-            "stage and invent the earlier prevolution stage(s) that would logically precede it.\n"
-            "- Plausible middle stage → invent both a prevolution and an evolution.\n\n"
+            "Using the character's name and the wiki context above:\n\n"
+            "STEP 1 — Lock in the TARGET character's own position, based only on its own name "
+            "pattern, lore depth, and tier (ignore everything else in the context for this step):\n"
+            "- Simple/diminutive/'baby'-style name or minimal lore presence → Stage 1.\n"
+            "- Elaborate name, strong lore presence, or a high power tier → the FINAL stage.\n"
+            "- Otherwise → a middle stage.\n\n"
+            "STEP 2 — Fill in only the side(s) that position still needs:\n"
+            "- Locked as Stage 1 → add evolution stage(s) AFTER it only. Do not add anything before.\n"
+            "- Locked as FINAL → add prevolution stage(s) BEFORE it only. Do not add anything "
+            "after, even if the context contains a real character that looks like a further "
+            "evolution — ignore it, it's not relevant to this character's line.\n"
+            "- Locked as middle → add one stage before AND one after.\n"
+            "For each stage you're filling in, check the context for a real existing character "
+            "that plausibly fits (smaller/weaker/simpler-named for an earlier stage, larger/"
+            "stronger/more elaborate for a later one) — a clear name/theme match is enough, the "
+            "page doesn't need to explicitly call itself a prevolution/evolution. Use that real "
+            "name when a good match exists; invent a name only when none does.\n\n"
             "Construct a line of 2 or 3 total stages. Each invented stage's name must match the "
             "wiki's Italian-brainrot naming convention and stay thematically consistent with this "
             "character's animal/object/concept base.\n\n"
@@ -115,8 +134,8 @@ MODES = {
             "Stage 2: [Name] — Lv [X]\n"
             "Stage 3: [Name] — Lv [X]  (omit this line entirely if the line only has 2 stages)"
         ),
-        "thinking_budget": 384,
-        "max_output_tokens": 768,
+        "thinking_budget": 640,
+        "max_output_tokens": 1024,
     },
 }
 
@@ -148,6 +167,29 @@ def retrieve_chunks(question, top_k=TOP_K):
     query_embedding = embedding_model.encode([QUERY_PREFIX + question]).tolist()
     results = collection.query(query_embeddings=query_embedding, n_results=top_k)
     return results["documents"][0], results["metadatas"][0]
+
+
+def retrieve_evolution_chunks(character_name, top_k=TOP_K):
+    """Plain-name retrieval alone rarely surfaces a real baby/evolved variant — e.g. a query for
+    "Bombardiro Crocodilo" doesn't return "Los Crocodilitos Dicen Kaboom" in the top 15 results,
+    even though that page explicitly describes itself as a baby version of it. Rephrasing the
+    query toward the relationship we're looking for (tested directly) reliably surfaces it. Runs
+    three targeted queries and merges them, deduped by title, so the model has a real chance of
+    finding an existing prevolution/evolution instead of always inventing one."""
+    queries = [
+        character_name,
+        f"baby form prevolution of {character_name}",
+        f"evolved mature final form of {character_name}",
+    ]
+    documents, metadatas, seen_titles = [], [], set()
+    for query in queries:
+        docs, metas = retrieve_chunks(query, top_k=top_k)
+        for doc, meta in zip(docs, metas):
+            if meta["title"] not in seen_titles:
+                seen_titles.add(meta["title"])
+                documents.append(doc)
+                metadatas.append(meta)
+    return documents, metadatas
 
 
 def dedupe_sources(metadatas):
@@ -206,7 +248,10 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
-    documents, metadatas = retrieve_chunks(request.question)
+    if request.mode == "evolution":
+        documents, metadatas = retrieve_evolution_chunks(request.question)
+    else:
+        documents, metadatas = retrieve_chunks(request.question)
 
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
 
