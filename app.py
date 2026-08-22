@@ -149,7 +149,17 @@ MODES = {
 app = FastAPI(title="Italian Brainrot Wiki Chat")
 
 embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+
+try:
+    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+except chromadb.errors.NotFoundError:
+    # chroma_db/ is a gitignored build artifact — rebuild it from wiki_data.json on first boot
+    # (e.g. a fresh Railway deploy) instead of requiring it to be committed to the repo.
+    import build_index
+
+    build_index.main()
+    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+
 gemini_client = genai.Client()  # reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment
 
 
