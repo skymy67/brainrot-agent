@@ -12,6 +12,7 @@ from google.genai import types
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+import evolution_mode
 import rarity_mode
 
 CHROMA_DIR = "chroma_db"
@@ -84,7 +85,17 @@ MODES = {
 app = FastAPI(title="Italian Brainrot Wiki Chat")
 
 embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+
+try:
+    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+except chromadb.errors.NotFoundError:
+    # chroma_db/ is a gitignored build artifact — rebuild it from wiki_data.json on first boot
+    # (e.g. a fresh Railway deploy) instead of requiring it to be committed to the repo.
+    import build_index
+
+    build_index.main()
+    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+
 gemini_client = genai.Client()  # reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment
 
 
@@ -109,6 +120,42 @@ def retrieve_chunks(question, top_k=TOP_K):
     query_embedding = embedding_model.encode([QUERY_PREFIX + question]).tolist()
     results = collection.query(query_embeddings=query_embedding, n_results=top_k)
     return results["documents"][0], results["metadatas"][0]
+
+
+def retrieve_evolution_chunks(character_name, top_k=8):
+    """Plain-name retrieval alone rarely surfaces a real baby/evolved variant — e.g. a query for
+    "Bombardiro Crocodilo" doesn't return "Los Crocodilitos Dicen Kaboom" in the top 15 results,
+    even though that page explicitly describes itself as a baby version of it. Rephrasing the
+    query toward the relationship we're looking for (tested directly) reliably surfaces it. Runs
+    three targeted queries and merges them, deduped by title, to build the candidate pool that
+    Evolution Mode is restricted to choosing real prevolution/evolution stages from — a wider
+    top_k than other modes use, since a real match that isn't retrieved here can never be found
+    (the model is never allowed to invent one instead)."""
+    queries = [
+        character_name,
+        f"baby form prevolution of {character_name}",
+        f"evolved mature final form of {character_name}",
+    ]
+    documents, metadatas, seen_titles = [], [], set()
+    for query in queries:
+        docs, metas = retrieve_chunks(query, top_k=top_k)
+        for doc, meta in zip(docs, metas):
+            if meta["title"] not in seen_titles:
+                seen_titles.add(meta["title"])
+                documents.append(doc)
+                metadatas.append(meta)
+    return documents, metadatas
+
+
+def evolution_candidate_titles(character_name, metadatas):
+    seen, candidates = set(), []
+    target = character_name.strip().lower()
+    for meta in metadatas:
+        title = meta["title"]
+        if title.strip().lower() != target and title not in seen:
+            seen.add(title)
+            candidates.append(title)
+    return candidates
 
 
 def dedupe_sources(metadatas):
@@ -163,13 +210,23 @@ def chat(request: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
+    if request.mode == "evolution":
+        documents, metadatas = retrieve_evolution_chunks(request.question)
+        context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+        candidate_titles = evolution_candidate_titles(request.question, metadatas)
+
+        answer = handle_gemini_errors(
+            lambda: evolution_mode.build_evolution_line(gemini_client, request.question, context, candidate_titles)
+        )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
     if request.mode not in MODES:
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
     documents, metadatas = retrieve_chunks(request.question)
-
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
     response = handle_gemini_errors(
