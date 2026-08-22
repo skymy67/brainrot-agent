@@ -12,6 +12,7 @@ from google.genai import types
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+import akinator_mode
 import evolution_mode
 import rarity_mode
 
@@ -117,6 +118,13 @@ class ChatRequest(BaseModel):
     mode: str = "qa"
     image_base64: str | None = None
     image_mime_type: str | None = None
+    # Akinator Mode only: "yes" | "no" | "unsure" | "reset" from the player's last button press,
+    # and the state this module last returned (None to start a new round). Everything else the
+    # backend does is a single stateless request/response, so — like the frontend already does
+    # for chat history via sessionStorage — round state round-trips through the client instead
+    # of living in server memory.
+    akinator_answer: str | None = None
+    akinator_state: dict | None = None
 
 
 class Source(BaseModel):
@@ -127,6 +135,7 @@ class Source(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list[Source]
+    akinator_state: dict | None = None
 
 
 def retrieve_chunks(question, top_k=TOP_K):
@@ -232,6 +241,15 @@ def chat(request: ChatRequest):
             lambda: evolution_mode.build_evolution_line(gemini_client, request.question, context, candidate_titles)
         )
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
+    if request.mode == "akinator":
+        # No RAG retrieval here — candidate narrowing works over the full wiki character list
+        # akinator_mode.py loads itself, not a per-question chroma_db lookup, so there are no
+        # "sources" to report for this mode.
+        answer, akinator_state = handle_gemini_errors(
+            lambda: akinator_mode.process_turn(gemini_client, request.akinator_state, request.akinator_answer)
+        )
+        return ChatResponse(answer=answer, sources=[], akinator_state=akinator_state)
 
     if request.mode not in MODES:
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
