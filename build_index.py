@@ -14,14 +14,11 @@ MAX_CHUNK_TOKENS = 500
 EMBED_BATCH_SIZE = 64
 ADD_BATCH_SIZE = 500
 
-model = SentenceTransformer(EMBEDDING_MODEL)
-
-
-def count_tokens(text):
+def count_tokens(text, model):
     return len(model.tokenizer.encode(text, add_special_tokens=False))
 
 
-def split_by_tokens(text, max_tokens):
+def split_by_tokens(text, max_tokens, model):
     """Hard-split text into pieces of at most max_tokens tokens."""
     tokens = model.tokenizer.encode(text, add_special_tokens=False)
     pieces = []
@@ -31,20 +28,24 @@ def split_by_tokens(text, max_tokens):
     return pieces
 
 
-def group_by_tokens(units, max_tokens):
+def group_by_tokens(units, max_tokens, model):
     """Greedily accumulate text units (paragraphs/sentences) into ~max_tokens chunks."""
     chunks = []
     current, current_tokens = [], 0
 
     for unit in units:
-        unit_tokens = count_tokens(unit)
+        unit_tokens = count_tokens(unit, model)
 
         if unit_tokens > max_tokens:
             if current:
                 chunks.append("\n\n".join(current))
                 current, current_tokens = [], 0
             sentences = unit.replace("\n", " ").split(". ")
-            chunks.extend(group_by_tokens(sentences, max_tokens) if len(sentences) > 1 else split_by_tokens(unit, max_tokens))
+            chunks.extend(
+                group_by_tokens(sentences, max_tokens, model)
+                if len(sentences) > 1
+                else split_by_tokens(unit, max_tokens, model)
+            )
             continue
 
         if current and current_tokens + unit_tokens > max_tokens:
@@ -60,33 +61,41 @@ def group_by_tokens(units, max_tokens):
     return chunks
 
 
-def chunk_page(content, max_tokens=MAX_CHUNK_TOKENS):
+def chunk_page(content, model, max_tokens=MAX_CHUNK_TOKENS):
     content = content.strip()
     if not content:
         return []
-    if count_tokens(content) <= max_tokens:
+    if count_tokens(content, model) <= max_tokens:
         return [content]
 
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-    return group_by_tokens(paragraphs, max_tokens)
+    return group_by_tokens(paragraphs, max_tokens, model)
 
 
-def build_chunks(pages):
+def build_chunks(pages, model):
     chunks, metadatas, ids = [], [], []
     for page_idx, page in enumerate(pages):
-        for chunk_idx, chunk in enumerate(chunk_page(page["content"])):
+        for chunk_idx, chunk in enumerate(chunk_page(page["content"], model)):
             chunks.append(chunk)
             metadatas.append({"title": page["title"], "url": page["url"]})
             ids.append(f"{page_idx}_{chunk_idx}")
     return chunks, metadatas, ids
 
 
-def main():
+def main(model=None):
+    # Accepts an already-loaded model so callers that already have one in memory (app.py's
+    # startup self-heal) can reuse it instead of this loading a second, fully separate copy of
+    # the same SentenceTransformer — duplicating that model contributed to an out-of-memory
+    # crash in production. Standalone use (`python3 build_index.py`) still works unchanged,
+    # loading its own model since there's nothing to reuse in that context.
+    if model is None:
+        model = SentenceTransformer(EMBEDDING_MODEL)
+
     with open(INPUT_FILE, encoding="utf-8") as f:
         pages = json.load(f)
     print(f"Loaded {len(pages)} pages from {INPUT_FILE}")
 
-    chunks, metadatas, ids = build_chunks(pages)
+    chunks, metadatas, ids = build_chunks(pages, model)
     print(f"Chunked into {len(chunks)} chunks")
 
     client = chromadb.PersistentClient(path=CHROMA_DIR)
