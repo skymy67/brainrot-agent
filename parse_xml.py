@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 
 import mwparserfromhell
 
-INPUT_FILE = "Italian+Brainrot+Wiki-20260821163544.xml"
+INPUT_FILES = ["Italian+Brainrot+Wiki-20260821163544.xml", "Slop_God.xml"]
 OUTPUT_FILE = "wiki_data.json"
 BASE_URL = "https://italianbrainrot.wikioasis.org/wiki/"
 MAIN_NAMESPACE = "0"
@@ -52,8 +52,17 @@ def parse_pages(path):
     return pages
 
 
+def merge_pages(*page_lists):
+    """Merge page lists by title, later lists override earlier ones for the same title."""
+    by_title = {}
+    for pages in page_lists:
+        for page in pages:
+            by_title[page["title"]] = page
+    return list(by_title.values())
+
+
 def main():
-    pages = parse_pages(INPUT_FILE)
+    pages = merge_pages(*(parse_pages(path) for path in INPUT_FILES))
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(pages, f, ensure_ascii=False, indent=2)
     print(f"Saved {len(pages)} pages to {OUTPUT_FILE}")
