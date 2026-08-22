@@ -86,15 +86,28 @@ app = FastAPI(title="Italian Brainrot Wiki Chat")
 
 embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
-try:
-    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
-except chromadb.errors.NotFoundError:
+def _load_or_build_collection():
     # chroma_db/ is a gitignored build artifact — rebuild it from wiki_data.json on first boot
-    # (e.g. a fresh Railway deploy) instead of requiring it to be committed to the repo.
+    # (e.g. a fresh Railway deploy) instead of requiring it to be committed to the repo. Rebuild
+    # not just when the collection is missing outright, but also when it exists with zero
+    # documents — e.g. a persisted volume left over from a deploy whose build got interrupted
+    # partway through, which get_collection() alone can't detect since it doesn't raise.
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    try:
+        existing = client.get_collection(COLLECTION_NAME)
+    except chromadb.errors.NotFoundError:
+        existing = None
+
+    if existing is not None and existing.count() > 0:
+        return existing
+
     import build_index
 
     build_index.main()
-    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
+    return client.get_collection(COLLECTION_NAME)
+
+
+collection = _load_or_build_collection()
 
 gemini_client = genai.Client()  # reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment
 
