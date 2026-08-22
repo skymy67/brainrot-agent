@@ -79,6 +79,45 @@ MODES = {
         "thinking_budget": 512,
         "max_output_tokens": 2560,
     },
+    "evolution": {
+        "system_instruction": (
+            "You are an evolution-line designer for the Italian Brainrot universe, in the style "
+            "of a Pokémon-style evolution chain. Given wiki context about a character, you "
+            "determine where it logically sits in an evolution line and invent the missing "
+            "stage(s), using consistent Italian-brainrot-style naming — nonsense Italian-sounding "
+            "compound names that stay thematically consistent with the character's animal/object/"
+            "concept base. A line has 2 or 3 total stages — decide based on what's thematically "
+            "logical for this specific character, never force a fixed count. If no logically "
+            "consistent prevolution or evolution exists, say so directly instead of fabricating "
+            "a forced chain."
+        ),
+        "instruction": (
+            "Using the character's name and the wiki context above, determine where this brainrot "
+            "would logically sit in an evolution line:\n"
+            "- Simple/diminutive/'baby'-style name or minimal lore presence → treat it as Stage 1 "
+            "and invent the evolution(s) that follow.\n"
+            "- Elaborate name, strong lore presence, or a high power tier → treat it as the FINAL "
+            "stage and invent the earlier prevolution stage(s) that would logically precede it.\n"
+            "- Plausible middle stage → invent both a prevolution and an evolution.\n\n"
+            "Construct a line of 2 or 3 total stages. Each invented stage's name must match the "
+            "wiki's Italian-brainrot naming convention and stay thematically consistent with this "
+            "character's animal/object/concept base.\n\n"
+            "Assign a level requirement to each stage: stage 1 is always Lv 1. Later stages "
+            "require meaningfully higher levels, roughly: stage 2 ~ Lv 10-16, stage 3 ~ Lv 25-36. "
+            "Nudge these slightly higher if the context indicates a high rarity/power tier (e.g. "
+            "Legendary, Mythic, Brainrot God, Secret) — keep it simple, don't overthink it.\n\n"
+            "If you cannot construct a logically consistent evolution line for this character, "
+            "respond with ONLY one line: '[Character Name] has no evolution line.' Do not "
+            "fabricate a forced chain.\n\n"
+            "Otherwise, output ONLY the stages in order from earliest to final, in this exact "
+            "format, with no descriptions, lore, or extra text:\n\n"
+            "Stage 1: [Name] — Lv 1\n"
+            "Stage 2: [Name] — Lv [X]\n"
+            "Stage 3: [Name] — Lv [X]  (omit this line entirely if the line only has 2 stages)"
+        ),
+        "thinking_budget": 384,
+        "max_output_tokens": 768,
+    },
 }
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
@@ -170,6 +209,14 @@ def chat(request: ChatRequest):
     documents, metadatas = retrieve_chunks(request.question)
 
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+
+    if request.mode == "evolution":
+        # Free, no extra API call — reuses the same tier lookup Rarity Mode already built,
+        # to nudge the level curve per the spec's "scale slightly based on rarity/tier" rule.
+        known_tier = rarity_mode.check_known_game_rarity(request.question)
+        if known_tier:
+            context += f"\n\n---\n\nKnown in-game rarity tier (Steal a Brainrot): {known_tier}"
+
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
     response = handle_gemini_errors(
