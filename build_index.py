@@ -11,8 +11,11 @@ CHROMA_DIR = "chroma_db"
 COLLECTION_NAME = "wiki_pages"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 MAX_CHUNK_TOKENS = 500
-EMBED_BATCH_SIZE = 64
-ADD_BATCH_SIZE = 500
+# Kept small — this runs on a memory-constrained production instance, and a smaller batch
+# lowers the peak memory spike during each model.encode() / collection.add() call instead of
+# holding hundreds of chunks' text, embeddings, and metadata in memory at once.
+EMBED_BATCH_SIZE = 16
+ADD_BATCH_SIZE = 128
 
 def count_tokens(text, model):
     return len(model.tokenizer.encode(text, add_special_tokens=False))
@@ -97,6 +100,7 @@ def main(model=None):
 
     chunks, metadatas, ids = build_chunks(pages, model)
     print(f"Chunked into {len(chunks)} chunks")
+    del pages  # chunks already holds this text (re-split); no need to keep both copies alive
 
     client = chromadb.PersistentClient(path=CHROMA_DIR)
     client.delete_collection(COLLECTION_NAME) if COLLECTION_NAME in [c.name for c in client.list_collections()] else None
