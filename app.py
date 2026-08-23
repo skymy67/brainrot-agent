@@ -93,9 +93,14 @@ def _load_or_build_collection():
     # not just when the collection is missing outright, but also when it exists with zero
     # documents — e.g. a persisted volume left over from a deploy whose build got interrupted
     # partway through, which get_collection() alone can't detect since it doesn't raise.
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    #
+    # Each chromadb.PersistentClient() call here is intentionally a short-lived temporary,
+    # never held in a variable across the build_index.main() call below — build_index.main()
+    # opens its own PersistentClient on the same on-disk path, and keeping an older client
+    # instance alive at the same time previously caused a startup crash on the SQLite-backed
+    # store when the rebuild path actually ran.
     try:
-        existing = client.get_collection(COLLECTION_NAME)
+        existing = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
     except chromadb.errors.NotFoundError:
         existing = None
 
@@ -104,8 +109,11 @@ def _load_or_build_collection():
 
     import build_index
 
-    build_index.main()
-    return client.get_collection(COLLECTION_NAME)
+    # Reuses embedding_model (already loaded above) instead of letting build_index.py load its
+    # own separate copy of the same SentenceTransformer — that duplication contributed to an
+    # out-of-memory crash in production.
+    build_index.main(model=embedding_model)
+    return chromadb.PersistentClient(path=CHROMA_DIR).get_collection(COLLECTION_NAME)
 
 
 collection = _load_or_build_collection()
