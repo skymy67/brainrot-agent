@@ -124,6 +124,53 @@ def _is_excluded_tag(tag):
     return any(pattern.search(tag) for pattern in EXCLUDED_TAG_PATTERNS)
 
 
+# The wiki's own Category: tags are extremely long-tailed — over 900 unique tags across 4687
+# pages, and even the single most common one ("Not Italian") only covers ~6% of the wiki. A
+# player who answers "no" to several of the most common individual tags in a row (the normal
+# case for any character that isn't one of a handful of very common types) barely narrows the
+# pool at all: a real test round for "Cocofanto Elefanto" (tagged Elephants/Coconut/Jungle,
+# none of which are common) went 4687 -> 3659 candidates over the full 30-question budget and
+# never converged. Grouping related low-frequency tags into a handful of broad, genuinely
+# intuitive supercategories (the kind of question a player would expect — "is it an animal?" —
+# matching direct user feedback) gives real, meaningfully bigger splits: "Animal" alone covers
+# ~9% of the wiki versus ~6% for the best single raw tag, and more importantly, an animal-
+# themed character now answers "yes" to ONE broad early question instead of "no" to a dozen
+# unrelated ones before its own specific tags ever become common enough to be picked. Each
+# candidate's tag set gets the matching supercategory name added in addition to (not instead
+# of) its own specific tags, so finer distinctions are still available once the pool narrows.
+SUPERCATEGORIES = {
+    "Animal": {
+        "Animals", "Monkey", "Cats", "Sharks", "Elephants", "Crocodile/Alligator", "Penguins",
+        "Sheep", "Dinosaur", "Horses", "Cephalopods", "Bears", "Reptiles", "Dogs", "Fish",
+        "Cows", "Frogs", "Frog", "Capybara", "Snake", "Pigeons", "Chicken", "Turtles", "Wolves",
+        "Pigs", "Dolphin", "Mouse", "Giraffe", "Big Cats", "Birds", "Aquatic",
+        "Skeletons", "Random animal family", "Snail", "Snails",
+    },
+    "Food": {
+        "Food", "Drinks", "Banana", "Fruits", "Watermelon", "Vegetables", "Junk foods",
+        "Desserts", "Strawberry", "Apple", "Coconut", "Pineapple", "Cheese", "Chocolate",
+        "Ice Cream", "Coffee", "Orange", "Food-themed Brainrots",
+    },
+    "Object": {
+        "Furniture", "Appliance", "Vehicles", "Bathroom", "Toilets", "Cars", "Cellphone",
+        "Phone", "Clock", "Musical Instruments", "Pillows", "Papers", "Shoes", "Trains",
+        "Wood", "Iron", "Chairs",
+    },
+    "Setting": {
+        "Forest", "City", "Desert", "Beach", "Jungle", "Sky", "School", "Space void", "Space",
+        "Kitchen", "Street", "Mountain", "Plains",
+    },
+}
+
+
+def _add_supercategories(tags):
+    expanded = set(tags)
+    for supercategory, members in SUPERCATEGORIES.items():
+        if tags & members:
+            expanded.add(supercategory)
+    return expanded
+
+
 def _load_characters():
     """Only titles and their (small) tag sets are kept in memory for the process lifetime —
     holding every page's full content in a second permanent copy (on top of what build_index.py
@@ -134,10 +181,10 @@ def _load_characters():
     with open(WIKI_DATA_FILE, encoding="utf-8") as f:
         pages = json.load(f)
     titles = [page["title"] for page in pages]
-    tags_by_title = {
-        page["title"]: {tag.strip() for tag in CATEGORY_RE.findall(page["content"]) if not _is_excluded_tag(tag.strip())}
-        for page in pages
-    }
+    tags_by_title = {}
+    for page in pages:
+        raw_tags = {tag.strip() for tag in CATEGORY_RE.findall(page["content"]) if not _is_excluded_tag(tag.strip())}
+        tags_by_title[page["title"]] = _add_supercategories(raw_tags)
     return titles, tags_by_title
 
 
