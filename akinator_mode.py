@@ -3,16 +3,26 @@
 
 Every question topic and every guess is chosen from the actual set of characters in
 wiki_data.json — the model is never asked to invent one. To make that tractable without
-feeding thousands of full wiki pages to Gemini on every turn, the candidate-narrowing itself
-is a deterministic decision-tree over each page's own MediaWiki `Category:` tags (mined once
-at startup, the same first-party signal already validated for Evolution Mode): at each turn we
-pick the tag that splits the current candidate pool closest to 50/50, which is the trait that
-carries the most information about which half of the pool the answer falls into. Gemini's role
-is narrower than "solve the game" — it phrases that chosen trait into a natural question, and
-once the pool has narrowed to a small shortlist, picks the best-fitting final guess from it.
+feeding thousands of full wiki pages to Gemini on every turn, candidate narrowing is driven by
+each page's own MediaWiki `Category:` tags (mined once at startup, the same first-party signal
+already validated for Evolution Mode) rather than free-form reasoning. Gemini's role is
+narrower than "solve the game" — it phrases a chosen trait into a natural question, and once
+the leaderboard has narrowed to a small shortlist, picks the best-fitting final guess from it.
 
-Session state (candidate pool, asked tags, question count, round history) has nowhere to live
-server-side in this app — there's no database or session store, and everything else the
+Narrowing itself is a weighted-score model, not a hard filter — matching the real Akinator's
+five-answer scale (Yes / Probably / Don't Know / Probably Not / No) rather than a strict
+yes/no/unsure. Every candidate keeps a running plausibility score for the whole round instead
+of being definitively kept or eliminated; each answer nudges matching candidates one way and
+non-matching candidates the other, by an amount that scales with how confident the answer was.
+This is deliberately not "closest-to-50% pool elimination": a single too-strict "no" on a trait
+the player is genuinely unsure about can't permanently kill the correct candidate the way hard
+filtering does, and a hedged "probably"/"probably not" carries real but smaller weight than a
+committed "yes"/"no". Question *selection* still greedily picks whichever available tag splits
+the current top-scoring candidates closest to 50/50 — the same "most informative next question"
+heuristic — just evaluated against the leaderboard instead of a shrinking eligible set.
+
+Session state (per-candidate scores, asked tags, question count, round history) has nowhere to
+live server-side in this app — there's no database or session store, and everything else the
 backend does is a single stateless request/response. So state round-trips through the
 request/response bodies each turn, the same way the frontend already persists chat history to
 sessionStorage; the caller (app.py) is only responsible for handing back whatever dict this
@@ -207,7 +217,11 @@ def _content_for_titles(titles):
 
 class AkinatorState(BaseModel):
     phase: Literal["asking", "guessing"] = "asking"
-    candidate_titles: list[str]
+    # Every title's running score. Absent titles are implicitly 0 (kept sparse only until the
+    # first question — after that every title has been nudged one way or the other, so this
+    # ends up holding all ~4687 entries in practice; see the module docstring below for why a
+    # full dict beats a shrinking hard-filtered list here).
+    scores: dict[str, float] = {}
     asked_tags: list[str] = []
     question_count: int = 0
     pending_tag: str | None = None
@@ -216,15 +230,61 @@ class AkinatorState(BaseModel):
     history: list[str] = []
 
 
-# --- Deterministic candidate narrowing ------------------------------------------------------
+# --- Weighted candidate scoring --------------------------------------------------------------
+#
+# The real Akinator asks with five answers — Yes, Probably, Don't Know, Probably Not, No — not
+# a strict three. That isn't cosmetic: it's the difference between a probabilistic model and a
+# hard filter. The original version of this module used pure set elimination (a "no" drops
+# every candidate with the tag, permanently); that's brittle in exactly the way a real player
+# experiences a round — one slightly-too-strict "no" on a trait the player is genuinely unsure
+# about permanently kills the correct candidate with no way to recover. Real Akinator instead
+# keeps every candidate "alive" the whole round, nudging a running plausibility score up or
+# down by each answer, so a wrong or hedged answer costs some ground rather than ending the
+# round for that candidate. This is that model: ANSWER_WEIGHTS below define how far each of the
+# five answers pushes a candidate's score, matching-candidates one way and non-matching
+# candidates the other, symmetrically.
+
+ANSWER_WEIGHTS = {"yes": 2, "probably": 1, "unsure": 0, "probably_not": -1, "no": -2}
+TOP_K_FOR_QUESTION_SELECTION = 150
+CONFIDENCE_MIN_SCORE = 4
+CONFIDENCE_GAP = 4
+DISQUALIFIED_SCORE = -1_000_000.0
+
+
+def _apply_score_update(scores, tag, answer):
+    weight = ANSWER_WEIGHTS.get(answer, 0)
+    if weight == 0 or tag is None:
+        return dict(scores)
+    updated = dict(scores)
+    for title in ALL_TITLES:
+        has_tag = tag in TAGS_BY_TITLE.get(title, ())
+        delta = weight if has_tag else -weight
+        updated[title] = updated.get(title, 0) + delta
+    return updated
+
+
+def _ranked_titles(scores):
+    """All real titles, highest score first; ties broken by wiki order for determinism."""
+    indexed = sorted(range(len(ALL_TITLES)), key=lambda i: (-scores.get(ALL_TITLES[i], 0), i))
+    return [ALL_TITLES[i] for i in indexed]
+
+
+def _confident_enough(ranked_titles, scores):
+    if len(ranked_titles) < 2:
+        return True
+    top_score = scores.get(ranked_titles[0], 0)
+    second_score = scores.get(ranked_titles[1], 0)
+    return top_score >= CONFIDENCE_MIN_SCORE and (top_score - second_score) >= CONFIDENCE_GAP
 
 
 def _best_split_tag(candidate_titles, asked_tags):
-    """The tag whose presence among the current pool is closest to a 50/50 split carries the
-    most information about which half the answer will fall into — the same greedy heuristic a
-    real 20-questions solver uses. Already-asked tags are excluded so we never repeat a
-    question. Returns None once no remaining tag usefully splits the pool (e.g. every
-    remaining candidate happens to share the same tags, or none are tagged at all)."""
+    """The tag whose presence among the current leaderboard is closest to a 50/50 split carries
+    the most information about which half the answer will fall into — the same greedy heuristic
+    a real 20-questions solver uses, now applied to the current top-scoring candidates rather
+    than a shrinking hard-filtered pool, so question selection stays focused on what actually
+    distinguishes the leaders. Already-asked tags are excluded so we never repeat a question.
+    Returns None once no remaining tag usefully splits the set (e.g. every candidate considered
+    happens to share the same tags, or none are tagged at all)."""
     asked = set(asked_tags)
     tag_counts = {}
     for title in candidate_titles:
@@ -233,22 +293,12 @@ def _best_split_tag(candidate_titles, asked_tags):
                 continue
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
-    # A tag held by every candidate (or none) carries zero information — skip it.
     useful = {tag: count for tag, count in tag_counts.items() if 0 < count < len(candidate_titles)}
     if not useful:
         return None
 
     half = len(candidate_titles) / 2
     return min(useful, key=lambda tag: abs(useful[tag] - half))
-
-
-def _filter_pool(candidate_titles, tag, answer):
-    if answer == "unsure" or tag is None:
-        return list(candidate_titles)
-    has_tag = lambda title: tag in TAGS_BY_TITLE.get(title, ())
-    if answer == "yes":
-        return [title for title in candidate_titles if has_tag(title)]
-    return [title for title in candidate_titles if not has_tag(title)]
 
 
 # --- Gemini calls (with deterministic fallbacks if they fail) ------------------------------
@@ -353,12 +403,12 @@ def _pick_best_guess(gemini_client, shortlist_titles, history_lines):
 # --- Turn orchestration ----------------------------------------------------------------------
 
 
-def _make_guess(gemini_client, pool, asked_tags, question_count, history, final_guess_made):
-    shortlist = pool[:MAX_SHORTLIST_FOR_GEMINI]
+def _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made):
+    shortlist = ranked_titles[:MAX_SHORTLIST_FOR_GEMINI]
     guess = shortlist[0] if len(shortlist) == 1 else _pick_best_guess(gemini_client, shortlist, history)
     new_state = AkinatorState(
         phase="guessing",
-        candidate_titles=pool,
+        scores=scores,
         asked_tags=asked_tags,
         question_count=question_count,
         pending_guess=guess,
@@ -368,27 +418,37 @@ def _make_guess(gemini_client, pool, asked_tags, question_count, history, final_
     return f"Is it **{guess}**?", new_state
 
 
-def _advance(gemini_client, pool, asked_tags, question_count, history, final_guess_made):
-    if not pool:
+def _advance(gemini_client, scores, asked_tags, question_count, history, final_guess_made):
+    ranked_titles = _ranked_titles(scores)
+    top_score = scores.get(ranked_titles[0], 0)
+
+    # Every real candidate has been pushed at or below the disqualification floor — every
+    # wrong guess demotes one this far, so this only happens once we've truly run out of
+    # plausible candidates, not just a low-information start.
+    if top_score <= DISQUALIFIED_SCORE:
         return (
             "None of the real wiki characters fit all those answers — I'm stuck! Want to tell "
             "me who it was, or start a new round?"
         ), None
 
-    if len(pool) == 1:
-        return _make_guess(gemini_client, pool, asked_tags, question_count, history, final_guess_made)
-
     if question_count >= MAX_QUESTIONS:
-        return _make_guess(gemini_client, pool, asked_tags, question_count, history, final_guess_made=True)
+        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made=True)
 
-    tag = _best_split_tag(pool, asked_tags)
+    if _confident_enough(ranked_titles, scores):
+        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made)
+
+    # Question selection focuses on the current leaders, not the full population — after the
+    # opening question (all scores still tied at 0) there's no meaningful "leaderboard" yet, so
+    # that first pick alone still draws from everyone.
+    active = ALL_TITLES if question_count == 0 else ranked_titles[:TOP_K_FOR_QUESTION_SELECTION]
+    tag = _best_split_tag(active, asked_tags)
     if tag is None:
-        return _make_guess(gemini_client, pool, asked_tags, question_count, history, final_guess_made)
+        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made)
 
     question_text = _phrase_question(gemini_client, tag, history)
     new_state = AkinatorState(
         phase="asking",
-        candidate_titles=pool,
+        scores=scores,
         asked_tags=asked_tags + [tag],
         question_count=question_count,
         pending_tag=tag,
@@ -399,10 +459,10 @@ def _advance(gemini_client, pool, asked_tags, question_count, history, final_gue
 
 
 def _handle_question_answer(gemini_client, state, answer):
-    pool = _filter_pool(state.candidate_titles, state.pending_tag, answer)
+    scores = _apply_score_update(state.scores, state.pending_tag, answer)
     question_count = state.question_count + 1
     history = state.history + [f"Q: {state.pending_tag}? A: {answer}"]
-    return _advance(gemini_client, pool, state.asked_tags, question_count, history, state.final_guess_made)
+    return _advance(gemini_client, scores, state.asked_tags, question_count, history, state.final_guess_made)
 
 
 def _handle_guess_answer(gemini_client, state, answer):
@@ -416,14 +476,19 @@ def _handle_guess_answer(gemini_client, state, answer):
             f"Want to tell me who it was?"
         ), None
 
-    pool = [title for title in state.candidate_titles if title != state.pending_guess]
-    return _advance(gemini_client, pool, state.asked_tags, state.question_count, history, state.final_guess_made)
+    # A wrong guess is strong evidence against that specific candidate — disqualify it outright
+    # (rather than just nudging its score down) so it's never guessed again this round, without
+    # otherwise disturbing every other candidate's accumulated evidence.
+    scores = dict(state.scores)
+    scores[state.pending_guess] = DISQUALIFIED_SCORE
+    return _advance(gemini_client, scores, state.asked_tags, state.question_count, history, state.final_guess_made)
 
 
 def process_turn(gemini_client, state_dict, answer):
     """Entry point. state_dict is the previous turn's returned state (None to start a new
-    round), answer is "yes" | "no" | "unsure" | "reset" from the player's last button press.
-    Returns (message_text, new_state_dict_or_None) — None means the round has ended."""
+    round), answer is "yes" | "probably" | "unsure" | "probably_not" | "no" | "reset" from the
+    player's last button press. Returns (message_text, new_state_dict_or_None) — None means the
+    round has ended."""
     answer = (answer or "").strip().lower()
 
     if answer == "reset":
@@ -438,15 +503,18 @@ def process_turn(gemini_client, state_dict, answer):
         state = None
 
     if state is None:
-        message, new_state = _advance(gemini_client, list(ALL_TITLES), [], 0, [], False)
+        message, new_state = _advance(gemini_client, {}, [], 0, [], False)
         return message, (new_state.model_dump() if new_state else None)
 
-    if answer not in ("yes", "no", "unsure"):
+    if state.phase == "asking" and answer not in ANSWER_WEIGHTS:
         answer = "unsure"
 
     if state.phase == "asking":
         message, new_state = _handle_question_answer(gemini_client, state, answer)
     else:
+        # A guess is a binary claim — only an explicit "yes" confirms it; every other answer
+        # (no, unsure, probably*) rejects it and moves on, so the 5-point scale doesn't need
+        # separate handling here.
         message, new_state = _handle_guess_answer(gemini_client, state, answer)
 
     return message, (new_state.model_dump() if new_state else None)
