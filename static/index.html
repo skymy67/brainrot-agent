@@ -293,8 +293,10 @@
   <button type="button" id="akinator-start-btn">Start Round</button>
   <div class="akinator-answer-buttons" id="akinator-answer-buttons" hidden>
     <button type="button" data-answer="yes">Yes</button>
-    <button type="button" data-answer="no">No</button>
+    <button type="button" data-answer="probably">Probably</button>
     <button type="button" data-answer="unsure">Don't Know</button>
+    <button type="button" data-answer="probably_not">Probably Not</button>
+    <button type="button" data-answer="no">No</button>
     <button type="button" data-answer="reset" class="akinator-give-up">Give Up</button>
   </div>
 </div>
@@ -343,7 +345,7 @@
     },
     akinator: {
       label: "Akinator",
-      description: "Think of a real wiki character — I'll ask yes/no questions to guess who it is.",
+      description: "Think of a real wiki character — I'll ask questions to guess who it is. Yes/No/Probably/Probably Not all count, so answer with how sure you are.",
       placeholder: "",
       isGame: true,
     },
@@ -619,7 +621,14 @@
     return performRequest(body, mode, question, skipUserMessage);
   }
 
-  const AKINATOR_ANSWER_LABELS = { yes: "Yes", no: "No", unsure: "Don't Know", reset: "Give Up" };
+  const AKINATOR_ANSWER_LABELS = {
+    yes: "Yes",
+    probably: "Probably",
+    unsure: "Don't Know",
+    probably_not: "Probably Not",
+    no: "No",
+    reset: "Give Up",
+  };
 
   function sendAkinatorTurn(answer, displayText, skipUserMessage) {
     const body = { question: "", mode: "akinator", akinator_answer: answer, akinator_state: akinatorState };
