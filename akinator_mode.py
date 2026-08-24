@@ -37,22 +37,30 @@ QUESTION_MAX_OUTPUT_TOKENS = 256
 GUESS_THINKING_BUDGET = 512
 GUESS_MAX_OUTPUT_TOKENS = 512
 
-# Category tags can be multi-word ("Category:Not Italian", "Category:Sahur family") — match to
-# the end of the line, not just \w+, or multi-word tags silently truncate to their first word
-# and collide with unrelated tags (e.g. "Not Italian" and "Not Indonesian" would both become
-# just "Not").
-CATEGORY_RE = re.compile(r"Category:([^\n]+)")
+# Category tags can be multi-word ("Category:Not Italian", "Category:Sahur family"), and on
+# ~31 of the wiki's 4687 pages, multiple categories appear back-to-back on the same source line
+# with no newline between them at all (a mwparserfromhell plain-text rendering quirk). Matching
+# only up to \n (or only up to the next literal newline) either truncates multi-word tags to
+# their first word, or — worse — swallows every subsequent "Category:X" on that line into one
+# giant garbage "tag" (e.g. "Category:Ostrich Category:Toilet" with no separator became the
+# single fake tag "OstrichCategory:ToiletCategory:Train"). That silently dropped real tags for
+# those pages, degrading how well the pool actually narrows for them. Stopping the match at the
+# next "Category:" occurrence too (not just \n) splits these correctly.
+CATEGORY_RE = re.compile(r"Category:(.*?)(?=Category:|\n|$)")
 
 # Tags that exist on real wiki pages but aren't player-observable traits of the character
 # itself — production/attribution metadata (which AI tool or human made the page), wiki
-# housekeeping, or anything tier/power/popularity-flavored (explicitly out of scope per the
-# spec: rarity-tier and stat-like data isn't fair question material here, RPG/Rarity mode
-# already cover that). Identified by inspecting the ~90 most common tags directly against
-# wiki_data.json; rarer tags may still slip through uncaught (e.g. an obscure creator name
-# attached to only a couple of pages) since exhaustively auditing ~900 unique tags by hand
-# isn't practical — an acceptable, disclosed limitation rather than a correctness bug.
+# housekeeping/editorial status, release-date or meme-age tracking, or anything tier/power/
+# popularity-flavored (explicitly out of scope per the spec: rarity-tier and stat-like data
+# isn't fair question material here, RPG/Rarity mode already cover that). A player thinking of
+# a character has no way to know these about their character's wiki page, so a tag like this
+# getting picked as a question forces an "unsure" answer that narrows nothing and wastes a turn.
+# Identified by inspecting the full ~900-tag frequency table (not just the top ones) for
+# editorial/attribution/meta patterns; an obscure one attached to only a page or two may still
+# slip through uncaught, an acceptable, disclosed limitation rather than a correctness bug.
 EXCLUDED_TAGS = {
     "Wikimades",
+    "Wikimade",
     "Legacy DALL-E",
     "Gemini",
     "Non-AI",
@@ -64,11 +72,49 @@ EXCLUDED_TAGS = {
     "Alexey Pigeon",
     "Noxa",
     "Articles with potentially offensive material",
+    "Italian brainrot creators",
+    "AI Reviewed Pages",
+    "Candidates for Shining Articles",
+    "Shining article",
+    "Featured",
+    "Stubs",
+    "Long articles",
+    "Disambiguation",
+    "Non-Mainstream Content",
+    "Non-mainstream content",
+    "Unverified content",
+    "Uncategorized Pages",
+    "Formerly Deleted",
+    "Deleted",
+    "Old Wiki",
+    "Undeleted pages",
+    "Steal a Brainrot-originating",
+    "Craft a Brainrot Exclusive",
+    "Very Young Brainrots",
+    "Non-existent Brainrot",
+    "Non-Brainrots",
+    "Bing DALL-E",
+    "Dreamina AI",
+    # In-game/collector rarity tiers — same "Steal a Brainrot" tier system Rarity Mode already
+    # covers, explicitly out of scope per the spec alongside the numeric "Tier X-Y" tags below.
+    "Common",
+    "Uncommon",
+    "Rare",
+    "Epic",
+    "Legendary",
+    "Mythic",
+    "Brainrot God",
+    "Secret",
+    "Celestial",
+    "OG",
 }
 EXCLUDED_TAG_PATTERNS = [
     re.compile(r"^Tier\b", re.IGNORECASE),  # power-tier classifications, e.g. "Tier 10-C"
     re.compile(r"'s [Bb]rainrots$"),  # creator-attribution tags, e.g. "Henzwxz's Brainrots"
     re.compile(r"^Brainrots of \w+ \d{4}$"),  # release-period tags, e.g. "Brainrots of March 2025"
+    re.compile(r"^\w+ \d{4} Brainrots$"),  # release-period tags, other word order
+    re.compile(r"\d Years?.? Old Brainrots$", re.IGNORECASE),  # meme-age tags
+    re.compile(r"\bAi Video Maker\b", re.IGNORECASE),  # AI-generation-tool attribution
 ]
 
 
