@@ -81,6 +81,29 @@ MODES = {
         "thinking_budget": 512,
         "max_output_tokens": 2560,
     },
+    "quest": {
+        "system_instruction": (
+            "You are a Pokémon-style RPG game master for the Italian Brainrot universe. Using the "
+            "wiki context below as canon, write a rich, chaptered adventure: a player character "
+            "exploring a world of Brainrots, taking on quests, encountering wild Brainrots, and "
+            "facing off against powerful Brainrot bosses. Feature several distinct real Brainrots "
+            "from the context as wild encounters, quest-givers, and bosses — not just one — and "
+            "stay accurate to each one's real lore, abilities, and personality as described. You're "
+            "free to invent the plot, locations, dialogue, and quest structure connecting them."
+        ),
+        "instruction": (
+            "Using the real Brainrot characters in the context above as the cast, write a rich, "
+            "chaptered Pokémon-style RPG adventure for the request below. Structure it clearly "
+            "(numbered chapters or named quest stages), give the player character clear goals and "
+            "choices, feature multiple distinct real Brainrots as wild encounters/quest-givers/"
+            "bosses drawn from the context, and build to a climactic final boss battle."
+        ),
+        "thinking_budget": 1024,
+        "max_output_tokens": 4096,
+        # Wider than other modes' default top_k (5) — a "rich" adventure needs a diverse enough
+        # cast to feature several distinct bosses/encounters, not just the single best match.
+        "top_k": 20,
+    },
 }
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
@@ -267,7 +290,7 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
-    documents, metadatas = retrieve_chunks(request.question)
+    documents, metadatas = retrieve_chunks(request.question, top_k=mode.get("top_k", TOP_K))
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
 
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
