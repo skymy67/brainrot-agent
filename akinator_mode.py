@@ -216,7 +216,9 @@ def _content_for_titles(titles):
 
 
 class AkinatorState(BaseModel):
-    phase: Literal["asking", "guessing"] = "asking"
+    # "revealing": the round ended without a correct guess, and the player is being asked to
+    # type in the real character so the round can be broken down against it.
+    phase: Literal["asking", "guessing", "revealing"] = "asking"
     # Every title's running score. Absent titles are implicitly 0 (kept sparse only until the
     # first question — after that every title has been nudged one way or the other, so this
     # ends up holding all ~4687 entries in practice; see the module docstring below for why a
@@ -228,6 +230,11 @@ class AkinatorState(BaseModel):
     pending_guess: str | None = None
     final_guess_made: bool = False
     history: list[str] = []
+    # Structured (tag, answer) log of every trait question actually answered this round — kept
+    # separate from the free-text `history` above (which is for Gemini prompts) so the reveal
+    # breakdown can check each answer against the revealed character's real tags without having
+    # to parse history's prose back apart.
+    answered_questions: list[dict] = []
 
 
 # --- Weighted candidate scoring --------------------------------------------------------------
@@ -400,10 +407,77 @@ def _pick_best_guess(gemini_client, shortlist_titles, history_lines):
     return lookup.get(parsed.guess_title.strip().lower(), shortlist_titles[0])
 
 
+# --- Reveal & post-round analysis -----------------------------------------------------------
+
+
+ANSWER_DISPLAY = {"yes": "Yes", "probably": "Probably", "unsure": "Don't Know", "probably_not": "Probably Not", "no": "No"}
+REVEAL_PROMPT = " Type the character's real name below and I'll show you where I went wrong (or start a new round)."
+
+
+def _find_title(revealed_name):
+    """Matches the player's typed reveal against a real wiki title — case-insensitive exact
+    match first, falling back to a substring match only when it's unambiguous. Never invents or
+    guesses a title that doesn't exist in the wiki."""
+    name = (revealed_name or "").strip()
+    if not name:
+        return None
+    exact = {title.lower(): title for title in ALL_TITLES}.get(name.lower())
+    if exact:
+        return exact
+    substring_matches = [title for title in ALL_TITLES if name.lower() in title.lower()]
+    return substring_matches[0] if len(substring_matches) == 1 else None
+
+
+def _analyze_reveal(revealed_title, answered_questions):
+    """Checks each answered trait question against the revealed character's actual tags and
+    reports which ones look like they were answered inconsistently — the concrete "where did I
+    go wrong" breakdown the player asked for."""
+    real_tags = TAGS_BY_TITLE.get(revealed_title, set())
+    lines = []
+    wrong_count = 0
+    for entry in answered_questions:
+        tag, answer = entry.get("tag"), entry.get("answer")
+        weight = ANSWER_WEIGHTS.get(answer, 0)
+        has_tag = tag in real_tags
+        answer_label = ANSWER_DISPLAY.get(answer, answer)
+        if weight == 0:
+            lines.append(f"- {tag}? You said {answer_label} — no claim made, doesn't affect scoring.")
+            continue
+        consistent = (weight > 0) == has_tag
+        trait_note = "has" if has_tag else "doesn't have"
+        if consistent:
+            lines.append(f"- {tag}? You said {answer_label} — ✅ consistent ({revealed_title} {trait_note} this trait).")
+        else:
+            wrong_count += 1
+            lines.append(f"- {tag}? You said {answer_label} — ❌ likely wrong ({revealed_title} {trait_note} this trait).")
+
+    header = f"It was **{revealed_title}**! Here's how your answers lined up:\n\n"
+    if not answered_questions:
+        footer = "\n\n(No trait questions were answered this round.)"
+    elif wrong_count == 0:
+        footer = "\n\nAll your answers were consistent with the real character — I just didn't land on a confident enough guess in time."
+    else:
+        if wrong_count == 1:
+            footer = "\n\n1 answer looks like it may have thrown me off."
+        else:
+            footer = f"\n\n{wrong_count} answers look like they may have thrown me off."
+    return header + "\n".join(lines) + footer
+
+
+def _handle_reveal(state, revealed_name):
+    title = _find_title(revealed_name)
+    if title is None:
+        return (
+            "I couldn't find that character in the wiki, so I can't break down the round — but "
+            "thanks for telling me! Start a new round whenever you're ready."
+        ), None
+    return _analyze_reveal(title, state.answered_questions), None
+
+
 # --- Turn orchestration ----------------------------------------------------------------------
 
 
-def _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made):
+def _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made, answered_questions):
     shortlist = ranked_titles[:MAX_SHORTLIST_FOR_GEMINI]
     guess = shortlist[0] if len(shortlist) == 1 else _pick_best_guess(gemini_client, shortlist, history)
     new_state = AkinatorState(
@@ -414,11 +488,12 @@ def _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count
         pending_guess=guess,
         final_guess_made=final_guess_made,
         history=history,
+        answered_questions=answered_questions,
     )
     return f"Is it **{guess}**?", new_state
 
 
-def _advance(gemini_client, scores, asked_tags, question_count, history, final_guess_made):
+def _advance(gemini_client, scores, asked_tags, question_count, history, final_guess_made, answered_questions):
     ranked_titles = _ranked_titles(scores)
     top_score = scores.get(ranked_titles[0], 0)
 
@@ -426,16 +501,24 @@ def _advance(gemini_client, scores, asked_tags, question_count, history, final_g
     # wrong guess demotes one this far, so this only happens once we've truly run out of
     # plausible candidates, not just a low-information start.
     if top_score <= DISQUALIFIED_SCORE:
-        return (
-            "None of the real wiki characters fit all those answers — I'm stuck! Want to tell "
-            "me who it was, or start a new round?"
-        ), None
+        message = "None of the real wiki characters fit all those answers — I'm stuck!" + REVEAL_PROMPT
+        new_state = AkinatorState(
+            phase="revealing", asked_tags=asked_tags, question_count=question_count,
+            final_guess_made=final_guess_made, history=history, answered_questions=answered_questions,
+        )
+        return message, new_state
 
     if question_count >= MAX_QUESTIONS:
-        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made=True)
+        return _make_guess(
+            gemini_client, scores, ranked_titles, asked_tags, question_count, history,
+            final_guess_made=True, answered_questions=answered_questions,
+        )
 
     if _confident_enough(ranked_titles, scores):
-        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made)
+        return _make_guess(
+            gemini_client, scores, ranked_titles, asked_tags, question_count, history,
+            final_guess_made, answered_questions,
+        )
 
     # Question selection focuses on the current leaders, not the full population — after the
     # opening question (all scores still tied at 0) there's no meaningful "leaderboard" yet, so
@@ -443,7 +526,10 @@ def _advance(gemini_client, scores, asked_tags, question_count, history, final_g
     active = ALL_TITLES if question_count == 0 else ranked_titles[:TOP_K_FOR_QUESTION_SELECTION]
     tag = _best_split_tag(active, asked_tags)
     if tag is None:
-        return _make_guess(gemini_client, scores, ranked_titles, asked_tags, question_count, history, final_guess_made)
+        return _make_guess(
+            gemini_client, scores, ranked_titles, asked_tags, question_count, history,
+            final_guess_made, answered_questions,
+        )
 
     question_text = _phrase_question(gemini_client, tag, history)
     new_state = AkinatorState(
@@ -454,6 +540,7 @@ def _advance(gemini_client, scores, asked_tags, question_count, history, final_g
         pending_tag=tag,
         final_guess_made=final_guess_made,
         history=history,
+        answered_questions=answered_questions,
     )
     return question_text, new_state
 
@@ -462,7 +549,8 @@ def _handle_question_answer(gemini_client, state, answer):
     scores = _apply_score_update(state.scores, state.pending_tag, answer)
     question_count = state.question_count + 1
     history = state.history + [f"Q: {state.pending_tag}? A: {answer}"]
-    return _advance(gemini_client, scores, state.asked_tags, question_count, history, state.final_guess_made)
+    answered_questions = state.answered_questions + [{"tag": state.pending_tag, "answer": answer}]
+    return _advance(gemini_client, scores, state.asked_tags, question_count, history, state.final_guess_made, answered_questions)
 
 
 def _handle_guess_answer(gemini_client, state, answer):
@@ -471,24 +559,30 @@ def _handle_guess_answer(gemini_client, state, answer):
         return f"Got it — it was **{state.pending_guess}**! 🎉", None
 
     if state.final_guess_made:
-        return (
-            f"You've stumped me! {MAX_QUESTIONS} questions and my final guess weren't enough. "
-            f"Want to tell me who it was?"
-        ), None
+        message = f"You've stumped me! {MAX_QUESTIONS} questions and my final guess weren't enough." + REVEAL_PROMPT
+        new_state = AkinatorState(
+            phase="revealing", asked_tags=state.asked_tags, question_count=state.question_count,
+            final_guess_made=state.final_guess_made, history=history, answered_questions=state.answered_questions,
+        )
+        return message, new_state
 
     # A wrong guess is strong evidence against that specific candidate — disqualify it outright
     # (rather than just nudging its score down) so it's never guessed again this round, without
     # otherwise disturbing every other candidate's accumulated evidence.
     scores = dict(state.scores)
     scores[state.pending_guess] = DISQUALIFIED_SCORE
-    return _advance(gemini_client, scores, state.asked_tags, state.question_count, history, state.final_guess_made)
+    return _advance(
+        gemini_client, scores, state.asked_tags, state.question_count, history,
+        state.final_guess_made, state.answered_questions,
+    )
 
 
-def process_turn(gemini_client, state_dict, answer):
+def process_turn(gemini_client, state_dict, answer, revealed_name=None):
     """Entry point. state_dict is the previous turn's returned state (None to start a new
     round), answer is "yes" | "probably" | "unsure" | "probably_not" | "no" | "reset" from the
-    player's last button press. Returns (message_text, new_state_dict_or_None) — None means the
-    round has ended."""
+    player's last button press. revealed_name is only used in the "revealing" phase — the real
+    character name the player typed in after a round ended without a correct guess. Returns
+    (message_text, new_state_dict_or_None) — None means the round has ended."""
     answer = (answer or "").strip().lower()
 
     if answer == "reset":
@@ -503,7 +597,11 @@ def process_turn(gemini_client, state_dict, answer):
         state = None
 
     if state is None:
-        message, new_state = _advance(gemini_client, {}, [], 0, [], False)
+        message, new_state = _advance(gemini_client, {}, [], 0, [], False, [])
+        return message, (new_state.model_dump() if new_state else None)
+
+    if state.phase == "revealing":
+        message, new_state = _handle_reveal(state, revealed_name)
         return message, (new_state.model_dump() if new_state else None)
 
     if state.phase == "asking" and answer not in ANSWER_WEIGHTS:
