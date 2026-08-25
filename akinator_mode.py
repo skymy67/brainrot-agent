@@ -576,6 +576,15 @@ def _confident_enough(ranked_titles, scores):
     return top_score >= CONFIDENCE_MIN_SCORE and (top_score - second_score) >= CONFIDENCE_GAP
 
 
+# The 4 original, broadest SUPERCATEGORIES entries — asked ahead of every narrower category
+# (Feline/Bird/Fruit/...) or raw tag by _best_split_tag below, mirroring how a player naturally
+# narrows a guess themselves: coarse first ("is it an animal?"), specific once the coarse answer
+# is known ("okay, what kind?"). Narrower tags often split the CURRENT candidates more evenly on
+# paper, but a broad question asked first is more legible round to round and avoids a lucky-split
+# raw tag or niche subcategory jumping the queue ahead of the categories a player expects first.
+BROAD_CATEGORIES = {"Animal", "Food", "Object", "Setting"}
+
+
 def _best_split_tag(candidate_titles, asked_tags):
     """The tag whose presence among the current leaderboard is closest to a 50/50 split carries
     the most information about which half the answer will fall into — the same greedy heuristic
@@ -583,7 +592,11 @@ def _best_split_tag(candidate_titles, asked_tags):
     than a shrinking hard-filtered pool, so question selection stays focused on what actually
     distinguishes the leaders. Already-asked tags are excluded so we never repeat a question.
     Returns None once no remaining tag usefully splits the set (e.g. every candidate considered
-    happens to share the same tags, or none are tagged at all)."""
+    happens to share the same tags, or none are tagged at all).
+
+    Tries BROAD_CATEGORIES first and only falls back to the full tag pool (narrower
+    supercategories and raw wiki tags alike) once every broad category has either already been
+    asked or no longer usefully splits the current candidates — see BROAD_CATEGORIES above."""
     asked = set(asked_tags)
     tag_counts = {}
     for title in candidate_titles:
@@ -592,12 +605,17 @@ def _best_split_tag(candidate_titles, asked_tags):
                 continue
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
-    useful = {tag: count for tag, count in tag_counts.items() if 0 < count < len(candidate_titles)}
-    if not useful:
-        return None
-
     half = len(candidate_titles) / 2
-    return min(useful, key=lambda tag: abs(useful[tag] - half))
+
+    def best_of(pool):
+        useful = {tag: count for tag, count in pool.items() if 0 < count < len(candidate_titles)}
+        if not useful:
+            return None
+        return min(useful, key=lambda tag: abs(useful[tag] - half))
+
+    broad_pool = {tag: count for tag, count in tag_counts.items() if tag in BROAD_CATEGORIES}
+    broad_pick = best_of(broad_pool)
+    return broad_pick if broad_pick is not None else best_of(tag_counts)
 
 
 # --- Gemini calls (with deterministic fallbacks if they fail) ------------------------------
