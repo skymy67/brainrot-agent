@@ -124,6 +124,27 @@ EXCLUDED_TAGS = {
     "Non-Brainrots",
     "Bing DALL-E",
     "Dreamina AI",
+    # These looked at first like in-universe fictional families ("is your character part of the
+    # X group?"), until checking their actual member pages: each groups together completely
+    # unrelated character names/themes with no shared trait, the same pattern as a wiki
+    # contributor's own username getting auto-attached to every page they created — e.g.
+    # "Beldarian" tags "Vinny", "William", and "Barrette" with nothing in common. A player has no
+    # way to know who made their character's page, so these are attribution metadata like
+    # "Wikimades" above, not player-observable traits. Found while building SUPERCATEGORIES
+    # below and cross-checking every candidate family tag's actual member pages for coherence.
+    "Karkerkur",
+    "Modmades",
+    "Doombasterd",
+    "Beldarian",
+    "Bicicleteira",
+    "Viciosini",
+    "Yibaty",
+    "Saphiri",
+    "Larila",
+    "Cani-mungos",
+    "Picciones",
+    "Goaat Galaxy",
+    "Breno",
     # In-game/collector rarity tiers — same "Steal a Brainrot" tier system Rarity Mode already
     # covers, explicitly out of scope per the spec alongside the numeric "Tier X-Y" tags below.
     "Common",
@@ -159,35 +180,227 @@ def _is_excluded_tag(tag):
 # case for any character that isn't one of a handful of very common types) barely narrows the
 # pool at all: a real test round for "Cocofanto Elefanto" (tagged Elephants/Coconut/Jungle,
 # none of which are common) went 4687 -> 3659 candidates over the full 30-question budget and
-# never converged. Grouping related low-frequency tags into a handful of broad, genuinely
-# intuitive supercategories (the kind of question a player would expect — "is it an animal?" —
-# matching direct user feedback) gives real, meaningfully bigger splits: "Animal" alone covers
-# ~9% of the wiki versus ~6% for the best single raw tag, and more importantly, an animal-
-# themed character now answers "yes" to ONE broad early question instead of "no" to a dozen
-# unrelated ones before its own specific tags ever become common enough to be picked. Each
-# candidate's tag set gets the matching supercategory name added in addition to (not instead
-# of) its own specific tags, so finer distinctions are still available once the pool narrows.
+# never converged. Grouping related low-frequency tags into broad, genuinely intuitive
+# supercategories (the kind of question a player would expect — "is it an animal?" — matching
+# direct user feedback) gives real, meaningfully bigger splits: "Animal" alone covers ~12% of
+# the wiki versus ~6% for the best single raw tag, and more importantly, an animal-themed
+# character now answers "yes" to ONE broad early question instead of "no" to a dozen unrelated
+# ones before its own specific tags ever become common enough to be picked.
+#
+# This started as 4 very broad groups (Animal/Food/Object/Setting). It's since been expanded to
+# ~50 categories at two tiers: the original 4 broad ones for the earliest, biggest splits, plus
+# narrower sub-groups (e.g. "Feline"/"Bird"/"Fruit"/"Vehicle") for once the pool has narrowed
+# enough that the broad category alone no longer discriminates well, plus a handful of specific
+# named in-universe families (e.g. "Sahur Family", "67 Family") that are genuine, well-defined
+# identity groups worth asking about directly. No question-selection code changes were needed
+# for this — _best_split_tag() already treats every tag (raw or supercategory, broad or narrow)
+# as one undifferentiated pool and just picks whichever currently splits the leaders closest to
+# 50/50, so adding more candidate tags here only gives it better options to choose from.
+#
+# Built by inspecting the full ~900-tag frequency table (same process PR #17's EXCLUDED_TAGS
+# audit used) and grouping tags with a genuinely shared, player-observable theme. Several
+# small candidate "families" were checked against their actual member pages and dropped for
+# incoherence (e.g. a 1-member "family" isn't a useful question) or turned out to be wiki
+# contributor usernames masquerading as categories (see the EXCLUDED_TAGS additions above).
+# Categories intentionally don't need to be mutually exclusive — a character can and often does
+# belong to several (e.g. a cat character matches both "Animal" and "Feline"), same as before.
+# Each candidate's tag set gets every matching supercategory name added in addition to (not
+# instead of) its own specific tags, so finer distinctions are still available once the pool
+# narrows.
 SUPERCATEGORIES = {
     "Animal": {
-        "Animals", "Monkey", "Cats", "Sharks", "Elephants", "Crocodile/Alligator", "Penguins",
-        "Sheep", "Dinosaur", "Horses", "Cephalopods", "Bears", "Reptiles", "Dogs", "Fish",
-        "Cows", "Frogs", "Frog", "Capybara", "Snake", "Pigeons", "Chicken", "Turtles", "Wolves",
-        "Pigs", "Dolphin", "Mouse", "Giraffe", "Big Cats", "Birds", "Aquatic",
-        "Skeletons", "Random animal family", "Snail", "Snails",
+        "Animals", "Antelope", "Aquatic", "Axolotl", "Bat", "Bears", "Beaver", "Beavers",
+        "Big Cats", "Bird", "Birds", "Buffalo", "Butterfly", "Camels", "Capybara", "Cat", "Cats",
+        "Cephalopods", "Chicken", "Chickens", "Chimpanzee", "Cows", "Crabs", "Crocodile",
+        "Crocodile/Alligator", "Deers", "Dinosaur", "Dog", "Dogs", "Dolphin", "Duo", "Eagles",
+        "Elephants", "Fish", "Fishes", "Fox", "Foxes", "Frog", "Frogs", "Giraffe", "Goose",
+        "Gorilla", "Hamsters", "Hedgehogs", "Herring", "Hippopotamus", "Horses", "Insect",
+        "Insects", "Jellyfish", "Lion", "Llama", "Mammoths", "Meerkats", "Monkey", "Mouse",
+        "Octopus", "Orca", "Ostrich", "Owl", "Penguins", "Pigeons", "Pigs", "Rabbit",
+        "Random animal family", "Reptiles", "Rhino", "Rodents", "Scorpion", "Sharks", "Sheep",
+        "Shrimp", "Skeletons", "Snail", "Snails", "Snake", "Snakes", "Spiders", "Squid",
+        "Squirrel", "Starfish", "Tapir", "Tiger", "Tigers", "Turtles", "Whales", "Wolves",
+        "Zebras",
     },
     "Food": {
-        "Food", "Drinks", "Banana", "Fruits", "Watermelon", "Vegetables", "Junk foods",
-        "Desserts", "Strawberry", "Apple", "Coconut", "Pineapple", "Cheese", "Chocolate",
-        "Ice Cream", "Coffee", "Orange", "Food-themed Brainrots",
+        "Apple", "Avocado", "Banana", "Boba", "Bread", "Broccoli", "Bubble Tea", "Burgers",
+        "Cactus", "Candies", "Candy", "Carrot", "Cheese", "Chocolate", "Coconut", "Coffee", "Cola",
+        "Cookie", "Cucumber", "Date Fruit", "Desserts", "Dragon Fruit", "Drinks", "Durian",
+        "Fanta", "Food", "Food-themed Brainrots", "Fruit", "Fruits", "Gingerbread", "Grape",
+        "Grapefruit", "Green Onion", "Grilled Food", "Guava", "Hot Dog", "Hotdog", "Ice Cream",
+        "Junk foods", "KFC", "Kebab", "Kiwi", "Lemon", "Mango", "Mangos", "Melon", "Milk", "Onion",
+        "Orange", "Pasta", "Pear", "Pepper", "Persimmon", "Pineapple", "Pizza", "Pomegranate",
+        "Potato", "Potatoes", "Pumpkin", "Soda", "Spaghetti", "Strawberry", "Sushi", "Sweets",
+        "Taco", "Tacos", "Vegetables", "Waffle", "Watermelon", "Zucchini",
     },
     "Object": {
-        "Furniture", "Appliance", "Vehicles", "Bathroom", "Toilets", "Cars", "Cellphone",
-        "Phone", "Clock", "Musical Instruments", "Pillows", "Papers", "Shoes", "Trains",
-        "Wood", "Iron", "Chairs",
+        "Amethyst", "Appliance", "Bathroom", "Bathroom Tools", "Bathtub", "Beaker", "Blenders",
+        "Board", "Boots", "Boxes", "Broom", "Canisters", "Cars", "Cellphone", "Chairs", "Clock",
+        "Computers", "Cube", "Cubes", "Diamond", "Door", "Electronics", "Fridges", "Furniture",
+        "Gems", "Go-Kart", "Gold", "Instruments", "Iron", "Lamp", "Machines",
+        "Musical Instruments", "Oven", "Pan", "Papers", "Phone", "Pillow", "Pillows",
+        "Refrigerator", "Rocket", "Rockets", "Sapphire", "Shoe", "Shoes", "Showerhead", "Sink",
+        "Sombrero", "Television", "Toilets", "Trains", "Truck", "Vehicles", "Washing Machine",
+        "Watch", "Wood",
     },
     "Setting": {
-        "Forest", "City", "Desert", "Beach", "Jungle", "Sky", "School", "Space void", "Space",
-        "Kitchen", "Street", "Mountain", "Plains",
+        "Arctic", "Beach", "City", "Desert", "Forest", "Garden", "Jungle", "Kitchen", "London",
+        "Meadow", "Moon", "Mountain", "Ocean", "Outer Space", "Plains", "Planets", "Plantation",
+        "School", "Schools", "Sea", "Sky", "Space", "Space void", "Street", "Sun", "Town", "Tree",
+        "Trees",
+    },
+    "Feline": {
+        "Big Cats", "Cat", "Cats", "Lion", "Tiger", "Tigers",
+    },
+    "Canine": {
+        "Dog", "Dogs", "Fox", "Foxes", "Wolves",
+    },
+    "Primate": {
+        "Chimpanzee", "Gorilla", "Monkey",
+    },
+    "Reptile": {
+        "Crocodile", "Crocodile/Alligator", "Reptiles", "Snake", "Snakes", "Turtles",
+    },
+    "Sea Creature": {
+        "Aquatic", "Catfish", "Cephalopods", "Crabs", "Dolphin", "Fish", "Fishes", "Herring",
+        "Jellyfish", "Octopus", "Orca", "Shark", "Sharks", "Shrimp", "Squid", "Starfish", "Whales",
+    },
+    "Bird": {
+        "Bird", "Birds", "Chicken", "Chickens", "Eagles", "Goose", "Ostrich", "Owl", "Penguins",
+        "Pigeons",
+    },
+    "Rodent": {
+        "Beaver", "Beavers", "Capybara", "Hamsters", "Mouse", "Rodents", "Squirrel",
+    },
+    "Farm Animal": {
+        "Bull", "Cows", "Horses", "Pigs", "Sheep",
+    },
+    "Big Wild Mammal": {
+        "Antelope", "Bears", "Buffalo", "Camels", "Deers", "Elephant", "Elephants", "Giraffe",
+        "Hippopotamus", "Llama", "Mammoths", "Rhino", "Tapir", "Zebras",
+    },
+    "Insect or Bug": {
+        "Butterfly", "Insect", "Insects", "Scorpion", "Spiders",
+    },
+    "Prehistoric": {
+        "Dinosaur", "Dinosauro", "Dinosauro Family", "Mammoths", "Prehistoric", "The Dinos",
+    },
+    "Skeleton or Undead": {
+        "Ghost", "Skeleton", "Skeleton Sahur", "Skeletons",
+    },
+    "Fruit": {
+        "Apple", "Avocado", "Banana", "Coconut", "Date Fruit", "Dragon Fruit", "Durian", "Fruit",
+        "Fruits", "Grape", "Grapefruit", "Guava", "Kiwi", "Lemon", "Mango", "Mangos", "Melon",
+        "Orange", "Pear", "Persimmon", "Pineapple", "Pomegranate", "Strawberry", "Watermelon",
+    },
+    "Vegetable": {
+        "Broccoli", "Cactus", "Carrot", "Cucumber", "Green Onion", "Onion", "Pepper", "Potato",
+        "Potatoes", "Pumpkin", "Vegetables", "Zucchini",
+    },
+    "Dessert or Sweet": {
+        "Candies", "Candy", "Chocolate", "Cookie", "Desserts", "Gingerbread", "Ice Cream",
+        "Sweets", "Waffle",
+    },
+    "Drink": {
+        "Boba", "Bubble Tea", "Coffee", "Cola", "Drinks", "Fanta", "Milk", "Soda",
+    },
+    "Fast or Savory Food": {
+        "Bread", "Burgers", "Cheese", "Grilled Food", "Hot Dog", "Hotdog", "Junk foods", "KFC",
+        "Kebab", "Pasta", "Pizza", "Spaghetti", "Sushi", "Taco", "Tacos",
+    },
+    "Vehicle": {
+        "Bus", "Cars", "Go-Kart", "Rocket", "Rockets", "Trains", "Truck", "Vehicles",
+    },
+    "Appliance Group": {
+        "Appliance", "Blenders", "Fridges", "Machines", "Oven", "Refrigerator", "Washing Machine",
+    },
+    "Bathroom Item": {
+        "Bathroom", "Bathroom Tools", "Bathtub", "Showerhead", "Sink", "Toilets",
+    },
+    "Electronics": {
+        "Cellphone", "Computers", "Electronics", "Phone",
+    },
+    "Furniture Item": {
+        "Chairs", "Furniture", "Pillow", "Pillows",
+    },
+    "Precious Material": {
+        "Amethyst", "Diamond", "Gems", "Gold", "Sapphire",
+    },
+    "Anthropomorphic": {
+        "Anthropomorphic", "Human", "Humanoid Features", "Humans", "Man",
+    },
+    "Muscular or Strong": {
+        "Bodybuilder", "Muscular", "Unstoppable",
+    },
+    "Loud or Distinct Sound": {
+        "High-pitched", "Loud",
+    },
+    "Dangerous or Scary": {
+        "Dangerous", "Explosive", "Horror", "Scary",
+    },
+    "Immortal or Godlike": {
+        "Gods", "Immortal", "Omnipotent",
+    },
+    "Robotic": {
+        "Mutant", "Mutants", "Robots",
+    },
+    "Combination or Fusion": {
+        "Combination", "Combinations", "Fusion", "Hybrids",
+    },
+    "Group of Multiple Characters": {
+        "Couples", "Duo", "Duos", "Trio",
+    },
+    "Royal": {
+        "Kingdom Roles", "Princess", "Royals",
+    },
+    "Villain": {
+        "Assassins", "Bandits", "Betrayer", "Outlaws", "Villains", "Villians",
+    },
+    "Hero": {
+        "Heros", "Warrior",
+    },
+    "Boss Character": {
+        "Boss", "Bosses",
+    },
+    "Baby or Young Character": {
+        "Babies", "Baby", "Bambino",
+    },
+    "Has Numbers or Letters": {
+        "Characters with letters", "Letter", "Letters", "Number", "Numbers",
+    },
+    "Monster": {
+        "Monsters",
+    },
+    "Fire-Themed": {
+        "Fire",
+    },
+    "Alien or Sci-Fi": {
+        "Aliens",
+    },
+    "Holiday-Themed": {
+        "Christmas", "Halloween",
+    },
+    "Sahur Family": {
+        "Alphabet Sahur", "Alphabetsahur", "Mutant Sahur", "Sahur", "Sahur family", "Sahurs",
+        "Skeleton Sahur", "Typographic Sahur",
+    },
+    "Signal Family": {
+        "Signal", "Signal Family",
+    },
+    "Bombardiro or Bomber Family": {
+        "Bombardino Family", "Bombardiro Family", "Bomber", "Bombers",
+    },
+    "Crocodile Family": {
+        "Crocaafk", "Crocodildo Family",
+    },
+    "67 Family": {
+        "67 Family",
+    },
+    "Matteo Family": {
+        "Matteo", "Matteo family",
+    },
+    "Wolf Group": {
+        "The Wolf Group members",
     },
 }
 
