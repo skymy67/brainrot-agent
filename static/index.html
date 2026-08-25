@@ -302,6 +302,10 @@
   </div>
 </div>
 
+<div class="akinator-row" id="quest-row" hidden>
+  <button type="button" id="quest-new-campaign-btn" class="akinator-give-up">New Campaign</button>
+</div>
+
 <form id="chat-form">
   <div class="image-row" id="image-row" hidden>
     <label for="image-input" id="image-label">+ Add reference image (optional)</label>
@@ -371,6 +375,8 @@
   const akinatorRowEl = document.getElementById("akinator-row");
   const akinatorStartBtn = document.getElementById("akinator-start-btn");
   const akinatorAnswerButtonsEl = document.getElementById("akinator-answer-buttons");
+  const questRowEl = document.getElementById("quest-row");
+  const questNewCampaignBtn = document.getElementById("quest-new-campaign-btn");
 
   // Plain fetch() requests are NOT paused by a backgrounded tab — the browser keeps
   // network I/O running and the response Promise still resolves. What DOES break an
@@ -386,6 +392,7 @@
   let messages = [];
   let pending = null; // { mode, body, displayText } while a request is in flight
   let akinatorState = null; // current Akinator round state (from the backend), or null between rounds
+  let questState = null; // current Quest Mode campaign state (from the backend), or null between campaigns
 
   function saveState() {
     sessionStorage.setItem(
@@ -395,6 +402,7 @@
         messages: messages.slice(-MAX_STORED_MESSAGES),
         pending,
         akinatorState,
+        questState,
       })
     );
   }
@@ -461,6 +469,19 @@
     for (const btn of akinatorAnswerButtonsEl.querySelectorAll("button")) btn.disabled = disabled;
   }
 
+  // Quest Mode is stateful like Akinator Mode, but — unlike Akinator's button-driven turns —
+  // it always uses the normal text form (to start a campaign, and again to steer/continue one),
+  // so this only needs to toggle the "New Campaign" row and the input placeholder.
+  function updateQuestControls() {
+    const inCampaign = currentMode === "quest" && questState !== null;
+    questRowEl.hidden = !inCampaign;
+    if (currentMode === "quest") {
+      inputEl.placeholder = inCampaign
+        ? 'What do you do next? (or type "continue")'
+        : MODES.quest.placeholder;
+    }
+  }
+
   function setMode(mode) {
     currentMode = mode;
     for (const btn of modeToggleEl.querySelectorAll("button")) {
@@ -477,6 +498,7 @@
     formEl.hidden = isGame;
     akinatorRowEl.hidden = !isGame;
     if (isGame) updateAkinatorControls();
+    updateQuestControls();
 
     saveState();
   }
@@ -607,6 +629,9 @@
       if (mode === "akinator") {
         akinatorState = data.akinator_state ?? null;
         updateAkinatorControls();
+      } else if (mode === "quest") {
+        questState = data.quest_state ?? null;
+        updateQuestControls();
       }
     } catch (err) {
       if (isUnloading) return; // the fetch abort is from navigation, not a real failure — leave `pending` intact
@@ -653,6 +678,13 @@
     return performRequest(body, "akinator", name, false);
   }
 
+  // text is the adventure brief (no campaign yet) or the player's next move/steer (mid-campaign)
+  // — questState carries which turn this is, same round-trip pattern as Akinator's state.
+  function sendQuestTurn(text) {
+    const body = { question: text, mode: "quest", quest_state: questState };
+    return performRequest(body, "quest", text, false);
+  }
+
   formEl.addEventListener("submit", (event) => {
     event.preventDefault();
     if (isSending) return;
@@ -671,9 +703,18 @@
 
     if (currentMode === "akinator") {
       sendAkinatorReveal(question);
+    } else if (currentMode === "quest") {
+      sendQuestTurn(question);
     } else {
       askQuestion(question, currentMode, false, image);
     }
+  });
+
+  questNewCampaignBtn.addEventListener("click", () => {
+    if (isSending) return;
+    questState = null;
+    updateQuestControls();
+    saveState();
   });
 
   akinatorStartBtn.addEventListener("click", () => {
@@ -699,9 +740,9 @@
     const saved = loadState();
     if (!saved) return;
 
-    // Restore `messages` and `akinatorState` before calling setMode() — setMode() calls
-    // saveState() (which would otherwise persist an empty message list and wipe the
-    // history we're about to restore) and, for a game mode, reads akinatorState to decide
+    // Restore `messages`, `akinatorState`, and `questState` before calling setMode() —
+    // setMode() calls saveState() (which would otherwise persist an empty message list and
+    // wipe the history we're about to restore) and reads akinatorState/questState to decide
     // which controls to show.
     if (saved.messages && saved.messages.length > 0) {
       messages = saved.messages;
@@ -709,6 +750,7 @@
     }
 
     if (saved.akinatorState !== undefined) akinatorState = saved.akinatorState;
+    if (saved.questState !== undefined) questState = saved.questState;
 
     if (saved.mode && MODES[saved.mode]) setMode(saved.mode);
 

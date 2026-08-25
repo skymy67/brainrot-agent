@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 
 import akinator_mode
 import evolution_mode
+import quest_mode
 import rarity_mode
 
 CHROMA_DIR = "chroma_db"
@@ -81,29 +82,6 @@ MODES = {
         "thinking_budget": 512,
         "max_output_tokens": 2560,
     },
-    "quest": {
-        "system_instruction": (
-            "You are a Pokémon-style RPG game master for the Italian Brainrot universe. Using the "
-            "wiki context below as canon, write a rich, chaptered adventure: a player character "
-            "exploring a world of Brainrots, taking on quests, encountering wild Brainrots, and "
-            "facing off against powerful Brainrot bosses. Feature several distinct real Brainrots "
-            "from the context as wild encounters, quest-givers, and bosses — not just one — and "
-            "stay accurate to each one's real lore, abilities, and personality as described. You're "
-            "free to invent the plot, locations, dialogue, and quest structure connecting them."
-        ),
-        "instruction": (
-            "Using the real Brainrot characters in the context above as the cast, write a rich, "
-            "chaptered Pokémon-style RPG adventure for the request below. Structure it clearly "
-            "(numbered chapters or named quest stages), give the player character clear goals and "
-            "choices, feature multiple distinct real Brainrots as wild encounters/quest-givers/"
-            "bosses drawn from the context, and build to a climactic final boss battle."
-        ),
-        "thinking_budget": 1024,
-        "max_output_tokens": 4096,
-        # Wider than other modes' default top_k (5) — a "rich" adventure needs a diverse enough
-        # cast to feature several distinct bosses/encounters, not just the single best match.
-        "top_k": 20,
-    },
 }
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
@@ -156,6 +134,9 @@ class ChatRequest(BaseModel):
     # of living in server memory.
     akinator_answer: str | None = None
     akinator_state: dict | None = None
+    # Quest Mode only: same round-tripped-state pattern as Akinator above. question doubles as
+    # the adventure brief on the first turn and the player's next move/steer on later turns.
+    quest_state: dict | None = None
 
 
 class Source(BaseModel):
@@ -167,6 +148,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source]
     akinator_state: dict | None = None
+    quest_state: dict | None = None
 
 
 def retrieve_chunks(question, top_k=TOP_K):
@@ -286,11 +268,28 @@ def chat(request: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=[], akinator_state=akinator_state)
 
+    if request.mode == "quest":
+        # Stateful and round-tripped through the client exactly like Akinator Mode above.
+        # request.question doubles as the adventure brief (no quest_state yet) or the player's
+        # next move/steer (mid-campaign). Retrieval stays anchored to the campaign's own goal on
+        # later turns (rather than just the latest short player message) so it keeps surfacing
+        # thematically relevant — but still unseen — Brainrots chapter after chapter.
+        prior_state = request.quest_state
+        query = request.question if prior_state is None else f"{prior_state.get('goal', '')} {request.question}".strip()
+        documents, metadatas = retrieve_chunks(query, top_k=quest_mode.CANDIDATES_PER_CHAPTER)
+
+        answer, quest_state = handle_gemini_errors(
+            lambda: quest_mode.process_turn(
+                gemini_client, prior_state, request.question, documents, metadatas
+            )
+        )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas), quest_state=quest_state)
+
     if request.mode not in MODES:
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
 
-    documents, metadatas = retrieve_chunks(request.question, top_k=mode.get("top_k", TOP_K))
+    documents, metadatas = retrieve_chunks(request.question)
     context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
 
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
