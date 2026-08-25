@@ -253,9 +253,13 @@ def chat(request: ChatRequest):
     if request.mode == "akinator":
         # No RAG retrieval here — candidate narrowing works over the full wiki character list
         # akinator_mode.py loads itself, not a per-question chroma_db lookup, so there are no
-        # "sources" to report for this mode.
+        # "sources" to report for this mode. request.question doubles as the reveal-phase free
+        # text (the real character name the player types after a round ends without a win) —
+        # it's otherwise unused by this mode, since every other turn is a button press.
         answer, akinator_state = handle_gemini_errors(
-            lambda: akinator_mode.process_turn(gemini_client, request.akinator_state, request.akinator_answer)
+            lambda: akinator_mode.process_turn(
+                gemini_client, request.akinator_state, request.akinator_answer, request.question
+            )
         )
         return ChatResponse(answer=answer, sources=[], akinator_state=akinator_state)
 
