@@ -2,12 +2,16 @@
 """Chunk wiki_data.json, embed the chunks locally, and store them in Chroma."""
 
 import json
+import os
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 
 INPUT_FILE = "wiki_data.json"
-CHROMA_DIR = "chroma_db"
+# Same DATA_DIR convention as app.py's own CHROMA_DIR (a Railway volume in production, "." for
+# local dev) — must resolve to the identical path whether this runs standalone or is imported
+# and called by app.py's startup self-heal.
+CHROMA_DIR = os.path.join(os.environ.get("DATA_DIR", "."), "chroma_db")
 COLLECTION_NAME = "wiki_pages"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 MAX_CHUNK_TOKENS = 500

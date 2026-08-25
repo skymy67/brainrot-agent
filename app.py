@@ -2,6 +2,7 @@
 """FastAPI backend that answers questions via RAG over the Italian Brainrot wiki."""
 
 import base64
+import os
 
 import chromadb
 from fastapi import FastAPI, HTTPException
@@ -17,7 +18,11 @@ import evolution_mode
 import quest_mode
 import rarity_mode
 
-CHROMA_DIR = "chroma_db"
+# Points at a Railway volume in production (set via the DATA_DIR env var) so chroma_db survives
+# redeploys instead of rebuilding from scratch on every one; defaults to the working directory
+# for local dev, where it already lived. akinator_mode.py reads the same env var for its own
+# persistent learning store, so both end up on the same volume.
+CHROMA_DIR = os.path.join(os.environ.get("DATA_DIR", "."), "chroma_db")
 COLLECTION_NAME = "wiki_pages"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 GEMINI_MODEL = "gemini-3.6-flash"

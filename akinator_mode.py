@@ -27,15 +27,34 @@ backend does is a single stateless request/response. So state round-trips throug
 request/response bodies each turn, the same way the frontend already persists chat history to
 sessionStorage; the caller (app.py) is only responsible for handing back whatever dict this
 module last returned.
+
+Tag *weights*, unlike round state, do persist server-side — a small on-disk store (see "Learned
+tag reliability" below) accumulates across every round ever revealed, on top of DATA_DIR (a
+Railway volume in production). This is the piece the wiki-derived, static tag data alone can't
+provide: real Akinator's own accuracy comes largely from collaborative filtering over millions
+of aggregated player answers, not just a fixed trait table. Here, every revealed round checks
+each answered question against the real character's actual tags and records whether the tag
+"held up" — a tag that keeps proving unreliable across many rounds (players routinely answer it
+in a way that turns out to contradict the revealed character) gets down-weighted in future
+scoring, and a consistently reliable one gets amplified, without ever needing new wiki data.
 """
 
 import json
+import os
 import re
+import threading
 from typing import Literal
 
 from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
+
+# Points at a Railway volume in production (set via the DATA_DIR env var) so the learned tag
+# stats below survive redeploys; defaults to the working directory for local dev, same as
+# wiki_data.json/chroma_db already implicitly do.
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+LEARNING_FILE = os.path.join(DATA_DIR, "akinator_learning.json")
 
 WIKI_DATA_FILE = "wiki_data.json"
 GEMINI_MODEL = "gemini-3.6-flash"
@@ -258,14 +277,74 @@ CONFIDENCE_GAP = 4
 DISQUALIFIED_SCORE = -1_000_000.0
 
 
+# --- Learned tag reliability (crowd-sourced from revealed rounds) --------------------------
+#
+# TAG_STATS accumulates, across every round any player has ever revealed, how often each tag's
+# answer actually held up against the real character (see _record_reveal_outcomes, called from
+# _analyze_reveal below). _tag_reliability turns that into a multiplier on the tag's normal
+# ANSWER_WEIGHTS delta — this is what lets the game's accuracy improve over time from real play
+# instead of staying fixed at whatever the static wiki-derived tags alone provide.
+
+_learning_lock = threading.Lock()
+
+
+def _load_tag_stats():
+    try:
+        with open(LEARNING_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+TAG_STATS = _load_tag_stats()
+
+
+def _save_tag_stats():
+    # Atomic write (temp file + rename) so a crash or a concurrent request reading this file
+    # mid-write can never see a half-written, corrupt learning file.
+    tmp_path = LEARNING_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(TAG_STATS, f)
+    os.replace(tmp_path, LEARNING_FILE)
+
+
+def _tag_reliability(tag):
+    """Laplace-smoothed reliability multiplier in (0.5, 1.5) — exactly 1.0 with no data yet
+    (falls back to the tag's plain ANSWER_WEIGHTS delta), climbing toward 1.5 for a tag that
+    keeps proving consistent across many revealed rounds, and down toward 0.5 for one that keeps
+    proving unreliable. The +1/+2 smoothing keeps a single early round from swinging a tag to an
+    extreme before enough data has actually accumulated."""
+    stats = TAG_STATS.get(tag)
+    if not stats:
+        return 1.0
+    total = stats["consistent"] + stats["inconsistent"]
+    ratio = (stats["consistent"] + 1) / (total + 2)
+    return 0.5 + ratio
+
+
+def _record_reveal_outcomes(consistency_by_tag):
+    """Persists one revealed round's outcomes. consistency_by_tag maps tag -> list of bools
+    (True = the player's answer matched the revealed character's real tag); only answers that
+    made a claim (weight != 0) are included — "unsure" carries no signal either way."""
+    if not consistency_by_tag:
+        return
+    with _learning_lock:
+        for tag, results in consistency_by_tag.items():
+            stats = TAG_STATS.setdefault(tag, {"consistent": 0, "inconsistent": 0})
+            for consistent in results:
+                stats["consistent" if consistent else "inconsistent"] += 1
+        _save_tag_stats()
+
+
 def _apply_score_update(scores, tag, answer):
     weight = ANSWER_WEIGHTS.get(answer, 0)
     if weight == 0 or tag is None:
         return dict(scores)
+    scaled_weight = weight * _tag_reliability(tag)
     updated = dict(scores)
     for title in ALL_TITLES:
         has_tag = tag in TAGS_BY_TITLE.get(title, ())
-        delta = weight if has_tag else -weight
+        delta = scaled_weight if has_tag else -scaled_weight
         updated[title] = updated.get(title, 0) + delta
     return updated
 
@@ -431,10 +510,13 @@ def _find_title(revealed_name):
 def _analyze_reveal(revealed_title, answered_questions):
     """Checks each answered trait question against the revealed character's actual tags and
     reports which ones look like they were answered inconsistently — the concrete "where did I
-    go wrong" breakdown the player asked for."""
+    go wrong" breakdown the player asked for. As a side effect, persists each claim-making
+    answer's consistency to the learned tag-reliability store (see _record_reveal_outcomes) so
+    future rounds' scoring benefits from this round's outcome too."""
     real_tags = TAGS_BY_TITLE.get(revealed_title, set())
     lines = []
     wrong_count = 0
+    consistency_by_tag = {}
     for entry in answered_questions:
         tag, answer = entry.get("tag"), entry.get("answer")
         weight = ANSWER_WEIGHTS.get(answer, 0)
@@ -444,12 +526,15 @@ def _analyze_reveal(revealed_title, answered_questions):
             lines.append(f"- {tag}? You said {answer_label} — no claim made, doesn't affect scoring.")
             continue
         consistent = (weight > 0) == has_tag
+        consistency_by_tag.setdefault(tag, []).append(consistent)
         trait_note = "has" if has_tag else "doesn't have"
         if consistent:
             lines.append(f"- {tag}? You said {answer_label} — ✅ consistent ({revealed_title} {trait_note} this trait).")
         else:
             wrong_count += 1
             lines.append(f"- {tag}? You said {answer_label} — ❌ likely wrong ({revealed_title} {trait_note} this trait).")
+
+    _record_reveal_outcomes(consistency_by_tag)
 
     header = f"It was **{revealed_title}**! Here's how your answers lined up:\n\n"
     if not answered_questions:
