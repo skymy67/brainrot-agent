@@ -2,7 +2,11 @@
 """FastAPI backend that answers questions via RAG over the Italian Brainrot wiki."""
 
 import base64
+import json
 import os
+import re
+import urllib.error
+import urllib.request
 
 import chromadb
 from fastapi import FastAPI, HTTPException
@@ -88,6 +92,59 @@ MODES = {
         "max_output_tokens": 2560,
     },
 }
+
+# Matches a question asking what a character looks like, so the visual-description feature only
+# spends the extra fetch/multimodal-call cost when it's actually likely to help — most questions
+# aren't about appearance, and the text-only RAG context already answers those fine on its own.
+APPEARANCE_INTENT_RE = re.compile(
+    r"(?i)\b(look|looks|looking|appearance|appear|picture|photo|image|visual(ly)?|drawn|drawing)\b"
+)
+IMAGE_FETCH_TIMEOUT = 8
+IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+}
+
+
+def _load_image_urls():
+    # A separate, lightweight (title -> URL string) read of wiki_data.json — akinator_mode.py
+    # already does its own independent read of the same file for its own purposes (titles/tags),
+    # so this follows the same established pattern rather than threading a shared load through
+    # both modules. Only string URLs are kept in memory, not page content, so this doesn't
+    # reintroduce the full-content memory duplication the OOM fix earlier removed.
+    with open("wiki_data.json", encoding="utf-8") as f:
+        pages = json.load(f)
+    return {page["title"]: page["image_url"] for page in pages if "image_url" in page}
+
+
+IMAGE_URL_BY_TITLE = _load_image_urls()
+
+
+def fetch_character_image(image_url, timeout=IMAGE_FETCH_TIMEOUT):
+    """Best-effort fetch of a character's real wiki portrait for a visual-description question.
+    Live wiki access is already known to be blocked from some environments (this sandbox
+    included — see the earlier wiki-scraping and Akinator research this session), and Railway's
+    own network access to it hasn't been verified, so this must never let a fetch failure
+    surface as an error: any problem (network error, timeout, non-200 status, an extension with
+    no known MIME type) returns (None, None) so the caller falls back to a text-only
+    description instead of crashing or hanging the request."""
+    mime_type = IMAGE_MIME_TYPES.get(os.path.splitext(image_url)[1].lower())
+    if mime_type is None:
+        return None, None
+    try:
+        request = urllib.request.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return None, None
+            return response.read(), mime_type
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None, None
+
 
 app = FastAPI(title="Italian Brainrot Wiki Chat")
 
@@ -299,10 +356,40 @@ def chat(request: ChatRequest):
 
     user_message = f"Context from the Italian Brainrot wiki:\n\n{context}\n\nRequest: {request.question}\n\n{mode['instruction']}"
 
+    # Visual-description feature: for an appearance question ("what does X look like?"), try
+    # fetching the top-matched character's real wiki portrait and hand it to Gemini alongside
+    # the text context, so the description is grounded in the actual image rather than guessed
+    # from prose alone. fetch_character_image() already degrades to (None, None) on any failure
+    # (blocked network, timeout, missing image), so this only changes the request shape when a
+    # real image was actually retrieved — otherwise it's the exact same text-only call as before.
+    image_bytes, image_mime_type, image_title = None, None, None
+    if metadatas and APPEARANCE_INTENT_RE.search(request.question):
+        image_title = metadatas[0]["title"]
+        image_url = IMAGE_URL_BY_TITLE.get(image_title)
+        if image_url:
+            image_bytes, image_mime_type = fetch_character_image(image_url)
+
+    if image_bytes:
+        contents = types.Content(
+            parts=[
+                types.Part.from_text(
+                    text=(
+                        f"The image below is {image_title}'s actual wiki portrait — describe "
+                        "what it actually shows (colors, shape, pose, expression, setting) "
+                        "rather than relying only on the text context for appearance details."
+                    )
+                ),
+                types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type),
+                types.Part.from_text(text=user_message),
+            ]
+        )
+    else:
+        contents = user_message
+
     response = handle_gemini_errors(
         lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=user_message,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=mode["system_instruction"],
                 max_output_tokens=mode["max_output_tokens"],
