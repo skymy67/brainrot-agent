@@ -135,14 +135,19 @@ def fetch_character_image(image_url, timeout=IMAGE_FETCH_TIMEOUT):
     description instead of crashing or hanging the request."""
     mime_type = IMAGE_MIME_TYPES.get(os.path.splitext(image_url)[1].lower())
     if mime_type is None:
+        print(f"[image fetch] skipped, unrecognized extension: {image_url}")
         return None, None
     try:
         request = urllib.request.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:
+                print(f"[image fetch] non-200 status {response.status}: {image_url}")
                 return None, None
-            return response.read(), mime_type
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            data = response.read()
+            print(f"[image fetch] succeeded, {len(data)} bytes: {image_url}")
+            return data, mime_type
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"[image fetch] failed ({exc}): {image_url}")
         return None, None
 
 
