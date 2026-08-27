@@ -41,8 +41,13 @@ MODES = {
             "using the provided context."
         ),
         "instruction": (
-            "Answer the question using only the context above. "
-            "If the context doesn't contain the answer, say so."
+            "Answer the question using the context above. A character's name in the context may "
+            "not exactly match how the user spelled it — typos, a doubled/missing letter, or "
+            "different capitalization are common. If a context character is clearly the same one "
+            "the user means despite a small spelling difference, treat it as a match and answer "
+            "normally using that character's context; don't reject it just because the spelling "
+            "isn't byte-for-byte identical. Only say the context doesn't contain the answer when "
+            "there's genuinely no matching or relevant character in it."
         ),
         "thinking_budget": 256,
         "max_output_tokens": 1536,
