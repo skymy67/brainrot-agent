@@ -3,9 +3,10 @@
 
 Two independent pieces per request:
   1. A single structured Gemini call generates the Brainrot Type, six battle stats (HP/Attack/
-     Defense/Special Attack/Special Defense/Speed), 2-4 flavored moves (each with a Battle Type,
-     power, accuracy, and effect), and flavor text — grounded in wiki context, falling back to
-     inferring from appearance/size/lore (and saying so) when the wiki doesn't document a stat
+     Defense/Special Attack/Special Defense/Speed) — each with its own one-sentence reasoning,
+     not just a bare number — 2-4 flavored moves (each with a Battle Type, power, accuracy, and
+     effect), and flavor text — grounded in wiki context, falling back to inferring from
+     appearance/size/lore (and saying so, per-stat) when the wiki doesn't document a stat
      directly, the same reasoning style the original stat-only version of this mode already used.
   2. A rarity tier, reusing rarity_mode.py's own scoring pipeline directly (its hardcoded-OG and
      known-game-rarity lookups first, cost-free; a search-grounded call only when neither hits) —
@@ -48,13 +49,24 @@ class MoveOutput(BaseModel):
     effect: str
 
 
+class StatValue(BaseModel):
+    value: int
+    # Required, not optional — every stat must argue for itself, tying the number to a specific
+    # documented detail (an ability, a combat feat, a described size) or, when the wiki doesn't
+    # document it, explicitly saying it was inferred from appearance/size and why. This is what
+    # got dropped when the mode was first rebuilt around structured output, and brought back
+    # after direct user feedback that stats without it "felt off" — arbitrary numbers with
+    # nothing backing them up.
+    reasoning: str
+
+
 class StatsOutput(BaseModel):
-    hp: int
-    attack: int
-    defense: int
-    special_attack: int
-    special_defense: int
-    speed: int
+    hp: StatValue
+    attack: StatValue
+    defense: StatValue
+    special_attack: StatValue
+    special_defense: StatValue
+    speed: StatValue
 
 
 class DexEntryOutput(BaseModel):
@@ -62,8 +74,9 @@ class DexEntryOutput(BaseModel):
     flavor_text: str
     stats: StatsOutput
     moves: list[MoveOutput]
-    # "" when every stat/type was grounded in documented wiki lore; otherwise a short note on
-    # what had to be inferred from appearance/size and why — never invented silently.
+    # "" when the Brainrot Type and moves were all grounded in documented wiki lore; otherwise a
+    # short note on what else had to be inferred and why — never invented silently. Per-stat
+    # inference reasoning lives on each StatValue instead; this covers everything else.
     inferred_note: str = ""
 
 
@@ -74,15 +87,19 @@ SYSTEM_INSTRUCTION = (
     "habitat/visual nature (where it lives or what element it visually belongs to).\n"
     "2) six battle stats (HP, Attack, Defense, Special Attack, Special Defense, Speed), each on "
     "a 1-100 scale, based on documented abilities, combat feats, size, and power scaling from "
-    "the context. When the wiki doesn't document a stat directly, infer it from physical "
-    "appearance, size, and apparent strength instead — and say so explicitly in inferred_note "
-    "rather than inventing unstated facts silently. Keep stats consistent with comparable "
-    "characters; don't inflate everything to the max.\n"
+    "the context. EVERY stat needs its own one-sentence reasoning tying the number to a specific "
+    "detail from the context (an ability, a combat feat, a described size or trait) — never a "
+    "bare number with no justification. When the wiki doesn't document a stat directly, infer it "
+    "from physical appearance, size, and apparent strength instead, and say so explicitly in "
+    "that stat's own reasoning rather than inventing unstated facts silently. Keep stats "
+    "consistent with comparable characters; don't inflate everything to the max.\n"
     "3) 2 to 4 signature moves, each with a short name, a Battle Type (from the fixed list "
     "given), a power value (1-100), an accuracy percentage (typically 70-100, lower for "
     "high-risk moves), and a one-line effect description. Moves must be flavored to this "
     "specific character's lore, personality, and appearance — never generic filler moves a "
-    "different character could equally have.\n"
+    "different character could equally have. Pick whichever Battle Type genuinely fits the "
+    "move's nature, even if it means most of a character's moves share one type — don't default "
+    "to a type just because it's a safe catch-all.\n"
     "4) flavor_text: exactly 1-2 sentences, in an in-universe Pokédex-entry tone."
 )
 
@@ -135,13 +152,16 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
 
     brainrot_type = _match_from_list(parsed.brainrot_type, rpg_types.BRAINROT_TYPES, FALLBACK_BRAINROT_TYPE)
 
+    def _clamp_stat(stat):
+        return StatValue(value=_clamp(stat.value, STAT_MIN, STAT_MAX, 50), reasoning=(stat.reasoning or "").strip())
+
     stats = StatsOutput(
-        hp=_clamp(parsed.stats.hp, STAT_MIN, STAT_MAX, 50),
-        attack=_clamp(parsed.stats.attack, STAT_MIN, STAT_MAX, 50),
-        defense=_clamp(parsed.stats.defense, STAT_MIN, STAT_MAX, 50),
-        special_attack=_clamp(parsed.stats.special_attack, STAT_MIN, STAT_MAX, 50),
-        special_defense=_clamp(parsed.stats.special_defense, STAT_MIN, STAT_MAX, 50),
-        speed=_clamp(parsed.stats.speed, STAT_MIN, STAT_MAX, 50),
+        hp=_clamp_stat(parsed.stats.hp),
+        attack=_clamp_stat(parsed.stats.attack),
+        defense=_clamp_stat(parsed.stats.defense),
+        special_attack=_clamp_stat(parsed.stats.special_attack),
+        special_defense=_clamp_stat(parsed.stats.special_defense),
+        speed=_clamp_stat(parsed.stats.speed),
     )
 
     moves = [
@@ -200,22 +220,29 @@ def compute_rarity_tier(gemini_client, character_name, wiki_context):
     return rarity_mode.score_to_tier(score_result.total_score, score_result.categories_maxed)
 
 
+# (label, StatsOutput attribute name) — spelled out in full rather than abbreviated (HP/ATK/DEF/
+# SPA/SPDEF/SPD), per direct feedback that abbreviations made the stat block harder to scan.
+STAT_LABELS = [
+    ("HP", "hp"),
+    ("Attack", "attack"),
+    ("Defense", "defense"),
+    ("Special Attack", "special_attack"),
+    ("Special Defense", "special_defense"),
+    ("Speed", "speed"),
+]
+
+
 def format_dex_entry(character_name, dex: DexEntryOutput, tier):
     stats = dex.stats
     move_lines = "\n".join(
         f"- {move.name} ({move.battle_type}) | PWR {move.power} | ACC {move.accuracy}% — {move.effect}"
         for move in dex.moves
     )
-    lines = [
-        f"**{character_name}** — {dex.brainrot_type} Type",
-    ]
-    if dex.flavor_text:
-        lines.append(dex.flavor_text)
+    lines = [f"**{character_name}** — {dex.brainrot_type} Type", ""]
+    for label, attr in STAT_LABELS:
+        stat = getattr(stats, attr)
+        lines.append(f"**{label}:** {stat.value}/100 — {stat.reasoning}")
     lines.append("")
-    lines.append(
-        f"HP {stats.hp} | ATK {stats.attack} | DEF {stats.defense} | "
-        f"SPA {stats.special_attack} | SPDEF {stats.special_defense} | SPD {stats.speed}"
-    )
     lines.append(f"Rarity: {tier}")
     lines.append("")
     lines.append("Moves:")
@@ -223,6 +250,11 @@ def format_dex_entry(character_name, dex: DexEntryOutput, tier):
     if dex.inferred_note:
         lines.append("")
         lines.append(f"*Inferred: {dex.inferred_note}*")
+    # The flavor text is the Dex "entry" proper — placed last, bolded, per direct feedback
+    # asking for it to close out the card instead of sitting right under the header.
+    if dex.flavor_text:
+        lines.append("")
+        lines.append(f"**{dex.flavor_text}**")
     return "\n".join(lines)
 
 
