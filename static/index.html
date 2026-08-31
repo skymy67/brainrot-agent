@@ -26,6 +26,10 @@
     height: 100vh;
     display: flex;
     flex-direction: column;
+    /* Safety net: nothing on this page should ever cause the whole body to scroll
+       sideways on a narrow phone screen — the mode-toggle row below handles its own
+       horizontal scroll instead of pushing the page wider than the viewport. */
+    overflow-x: hidden;
   }
 
   header {
@@ -47,13 +51,24 @@
   }
 
   .mode-toggle {
-    display: inline-flex;
+    display: flex;
+    max-width: 100%;
     margin-top: 12px;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 3px;
     gap: 3px;
+    /* On a phone, 7 mode buttons are wider than the screen — scroll the row itself
+       (swipe sideways) instead of wrapping to multiple rows (eats vertical space) or
+       overflowing the page (the body.overflow-x:hidden safety net would just clip it). */
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .mode-toggle::-webkit-scrollbar {
+    display: none;
   }
 
   .mode-toggle button {
@@ -65,6 +80,8 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .mode-toggle button.active {
@@ -267,6 +284,25 @@
     text-align: center;
     color: var(--muted);
     font-size: 14px;
+  }
+
+  @media (max-width: 480px) {
+    header {
+      padding: 12px 16px;
+    }
+
+    #chat {
+      padding: 16px;
+    }
+
+    form,
+    .akinator-row {
+      padding: 12px 16px;
+    }
+
+    .message {
+      max-width: 92%;
+    }
   }
 </style>
 </head>
