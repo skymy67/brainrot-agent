@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
 import akinator_mode
+import craft_mode
 import evolution_mode
 import quest_mode
 import rarity_mode
@@ -101,6 +102,30 @@ def _load_image_urls():
 
 
 IMAGE_URL_BY_TITLE = _load_image_urls()
+
+
+def best_title_match(question, metadatas):
+    """The RAG top match isn't reliably the exact character asked about — measured directly:
+    querying this wiki's own embeddings for the literal string "Tralalero Tralala" returns
+    "Brololino Bralila" as the #1 result (a differently-named, differently-gibberish character),
+    with the real Tralalero Tralala only showing up at rank 4. Trusting metadatas[0] blindly for
+    an image lookup would show Gemini a real image while claiming — wrongly — that it's the
+    portrait of the character the player actually asked about. Two tiers before falling back to
+    the top RAG rank: an exact (case-insensitive) title match — the common case for modes where
+    the question IS just a bare character name (Craft/RPG/Rarity/Evolution) — and, for a full
+    natural-language question a bare-name match can't catch ("what does X look like?"), a real
+    title appearing verbatim inside the question, only when exactly one candidate qualifies (the
+    same exact-then-unambiguous-substring pattern akinator_mode._find_title already uses)."""
+    if not metadatas:
+        return None
+    question_lower = question.strip().lower()
+    for meta in metadatas:
+        if meta["title"].strip().lower() == question_lower:
+            return meta["title"]
+    substring_matches = [meta["title"] for meta in metadatas if meta["title"].strip().lower() in question_lower]
+    if len(substring_matches) == 1:
+        return substring_matches[0]
+    return metadatas[0]["title"]
 
 
 def fetch_character_image(image_url, timeout=IMAGE_FETCH_TIMEOUT):
@@ -309,6 +334,27 @@ def chat(request: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
+    if request.mode == "craft":
+        documents, metadatas = retrieve_chunks(request.question)
+        context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+
+        # Unlike the visual-description feature in the generic mode path below, the image fetch
+        # here is never gated behind an appearance-intent check — confirming components visually
+        # is this mode's whole purpose, not an occasional add-on, so it's always attempted when
+        # best_title_match() resolves to a known image_url. fetch_character_image() already
+        # degrades to (None, None) on any failure, so a blocked/missing image just falls back to
+        # text-only reasoning rather than failing the request.
+        image_bytes, image_mime_type = None, None
+        if metadatas:
+            image_url = IMAGE_URL_BY_TITLE.get(best_title_match(request.question, metadatas))
+            if image_url:
+                image_bytes, image_mime_type = fetch_character_image(image_url)
+
+        answer = handle_gemini_errors(
+            lambda: craft_mode.build_recipe(gemini_client, request.question, context, image_bytes, image_mime_type)
+        )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
     if request.mode == "akinator":
         # No RAG retrieval here — candidate narrowing works over the full wiki character list
         # akinator_mode.py loads itself, not a per-question chroma_db lookup, so there are no
@@ -356,7 +402,7 @@ def chat(request: ChatRequest):
     # real image was actually retrieved — otherwise it's the exact same text-only call as before.
     image_bytes, image_mime_type, image_title = None, None, None
     if metadatas and APPEARANCE_INTENT_RE.search(request.question):
-        image_title = metadatas[0]["title"]
+        image_title = best_title_match(request.question, metadatas)
         image_url = IMAGE_URL_BY_TITLE.get(image_title)
         if image_url:
             image_bytes, image_mime_type = fetch_character_image(image_url)
