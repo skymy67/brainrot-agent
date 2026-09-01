@@ -23,6 +23,7 @@ import evolution_mode
 import quest_mode
 import rarity_mode
 import rpg_mode
+from content_policy import with_content_policy
 
 # Points at a Railway volume in production (set via the DATA_DIR env var) so chroma_db survives
 # redeploys instead of rebuilding from scratch on every one; defaults to the working directory
@@ -38,7 +39,7 @@ QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 MODES = {
     "qa": {
-        "system_instruction": (
+        "system_instruction": with_content_policy(
             "You are a helpful assistant answering questions about the Italian Brainrot wiki "
             "using the provided context."
         ),
@@ -55,7 +56,7 @@ MODES = {
         "max_output_tokens": 1536,
     },
     "creative": {
-        "system_instruction": (
+        "system_instruction": with_content_policy(
             "You are a creative storyteller for the Italian Brainrot universe. Treat the provided "
             "wiki context as canon — character traits, lore, and relationships should stay consistent "
             "with it — but you're free to invent scenes, dialogue, and details the wiki doesn't cover "

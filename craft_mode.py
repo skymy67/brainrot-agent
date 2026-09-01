@@ -20,6 +20,8 @@ though this wiki's own humor might invite one:
 from google.genai import types
 from pydantic import BaseModel
 
+from content_policy import with_content_policy
+
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 512
 MAX_OUTPUT_TOKENS = 1024
@@ -65,6 +67,7 @@ SYSTEM_INSTRUCTION = (
     "contributes (e.g. 'base', 'accessory', 'weapon', 'second base' for a fusion of two "
     "equally-prominent things — use whatever role word actually fits, not a fixed list)."
 )
+SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
 
 def _build_prompt(character_name, wiki_context, has_image):

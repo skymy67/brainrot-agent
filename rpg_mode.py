@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 import rarity_mode
 import rpg_types
+from content_policy import with_content_policy
 
 GEMINI_MODEL = "gemini-3.6-flash"
 DEX_THINKING_BUDGET = 640
@@ -109,6 +110,7 @@ SYSTEM_INSTRUCTION = (
     "different character could equally have.\n"
     "4) flavor_text: exactly 1-2 sentences, in an in-universe Pokédex-entry tone."
 )
+SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
 
 def _build_prompt(character_name, wiki_context):
