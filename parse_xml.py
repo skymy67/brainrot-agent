@@ -37,6 +37,31 @@ PAGENAME_RE = re.compile(r"(?i)\{\{\s*(?:FULL)?PAGENAME\s*\}\}")
 # would 404.
 LOOKS_LIKE_FILENAME_RE = re.compile(r"(?i)^[^<>{}|\n]+\.(png|jpe?g|gif|webp|svg|bmp|mp4|gifv)$")
 
+# The wiki's own first-party content-warning template — editors attach this (with a "details"/
+# "severity" note) to pages whose song lyrics contain extreme profanity, blasphemy, or sexual
+# content (verified by inspecting real flagged pages, e.g. Tralalero Tralala's lyrics literally
+# translate to "damn God and damn Allah" plus much more explicit material). ~650 of the wiki's
+# ~4700 pages carry this. "nooffensiveban" is an unrelated anti-vandalism template found on a
+# User: talk page during the audit below and deliberately excluded — parse_pages() only processes
+# the main (character) namespace anyway, so it would never match a real page, but it's excluded
+# here too for clarity. Same "trust the wiki's own first-party signal" approach already used for
+# INFOBOX_TEMPLATE_NAMES above and akinator_mode.py's Category:Baby handling, rather than this
+# pipeline trying to judge "is this offensive" itself.
+OFFENSIVE_TEMPLATE_RE = re.compile(r"\{\{\s*(?:offensive|offensive2|offensive content)\s*[|}]", re.IGNORECASE)
+
+# Matches a whole "== Lyrics ==" section — the heading line through everything up to (but not
+# including) the next level-2 heading or end of page. Operates on the RAW wikitext string, before
+# mwparserfromhell ever parses it — deliberately, not a tree-based mwparserfromhell.get_sections()
+# pass: on real pages here, an unclosed/malformed {{Collapse|...}} template wrapping the giant
+# multi-language lyrics dump confuses mwparserfromhell's tree parser (both get_sections() and a
+# manual top-level node scan were tested and both silently swallowed the following History/
+# Etymology sections into the malformed template's fallout — verified against Tralalero Tralala's
+# real page). A level-2 heading in this wiki's convention is always written as a line that starts
+# "==" followed by something other than a third "=" (which would make it a level-3+ subheading
+# instead) — a plain string match on that exact convention isn't tricked by the same malformed
+# markup that fools structural parsing.
+LYRICS_SECTION_RE = re.compile(r"(?ms)^==\s*Lyrics\s*==\s*\n.*?(?=^==[^=]|\Z)")
+
 
 def to_plain_text(code):
     """Render already-parsed wikitext down to plain prose, matching the MediaWiki API's
@@ -142,6 +167,21 @@ def _extract_image_filename_unvalidated(code, title):
     return None
 
 
+def _is_flagged_offensive(wikitext):
+    return bool(OFFENSIVE_TEMPLATE_RE.search(wikitext))
+
+
+def _strip_lyrics_section(wikitext):
+    """Removes a flagged page's whole "Lyrics" section — heading plus every nested subsection
+    (each language's translation) — from the raw wikitext, before it's ever parsed, flattened to
+    plain text, or stored. That's specifically where the explicit/blasphemous content actually
+    lives on every flagged page checked; everything else (description, history, reception,
+    trivia, battle info) is left untouched, so one section doesn't cost a character its entire
+    usable content — the resulting prompt no longer trips Gemini's own safety filter on the
+    character's own name."""
+    return LYRICS_SECTION_RE.sub("", wikitext)
+
+
 def parse_pages(path):
     pages = []
     for _, elem in ET.iterparse(path, events=("end",)):
@@ -156,6 +196,8 @@ def parse_pages(path):
         title = elem.findtext(f"{MW_NS}title")
         revision = elem.find(f"{MW_NS}revision")
         wikitext = revision.findtext(f"{MW_NS}text") or "" if revision is not None else ""
+        if _is_flagged_offensive(wikitext):
+            wikitext = _strip_lyrics_section(wikitext)
         code = mwparserfromhell.parse(wikitext)
 
         image_filename = extract_image_filename(code, title)
