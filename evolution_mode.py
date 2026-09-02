@@ -14,6 +14,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 import rarity_mode
+from content_policy import with_content_policy
 
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 640
@@ -63,6 +64,7 @@ SYSTEM_INSTRUCTION = (
     "candidate just to fill a slot, and never reject a genuinely valid baby-stage match just "
     "because a weaker or unrelated candidate also happens to be in the list."
 )
+SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
 
 def _format_candidates(candidate_titles):

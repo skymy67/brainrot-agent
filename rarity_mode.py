@@ -20,6 +20,8 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
+from content_policy import with_content_policy
+
 # --- Config: easy to extend later ---------------------------------------------------
 
 # Hardcoded OG brainrots — predate the AI-brainrot era. Case-insensitive exact match
@@ -431,6 +433,7 @@ def run_og_and_rarity_search(gemini_client: "genai.Client", character_name, wiki
         "character has an existing rarity tier in 'Steal a Brainrot' or a similar brainrot "
         "collector game."
     )
+    system_instruction = with_content_policy(system_instruction)
     # Structured output (response_schema) isn't supported together with the google_search
     # tool — when tools are enabled, the model's output is driven by its tool-calling flow,
     # not schema enforcement. So we ask for JSON in the prompt instead and parse it manually.
@@ -540,7 +543,7 @@ def run_final_scoring(gemini_client: "genai.Client", character_name, wiki_contex
         model=GEMINI_MODEL,
         contents=types.Content(parts=prompt_parts),
         config=types.GenerateContentConfig(
-            system_instruction=(
+            system_instruction=with_content_policy(
                 "You are a rarity-tier judge for the Italian Brainrot wiki, applying a strict, "
                 "explicit scoring rubric consistently across characters. Never assign a tier "
                 "from vibes alone — always derive it from the rubric's point totals."

@@ -49,6 +49,8 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
+from content_policy import with_content_policy
+
 # Points at a Railway volume in production (set via the DATA_DIR env var) so the learned tag
 # stats below survive redeploys; defaults to the working directory for local dev, same as
 # wiki_data.json/chroma_db already implicitly do.
@@ -634,6 +636,7 @@ QUESTION_SYSTEM_INSTRUCTION = (
     "object, or a similar observable trait. Keep it under 20 words. Never introduce a trait "
     "other than the one given, and never reference or guess a specific character name."
 )
+QUESTION_SYSTEM_INSTRUCTION = with_content_policy(QUESTION_SYSTEM_INSTRUCTION)
 
 
 def _fallback_question_text(tag):
@@ -679,6 +682,7 @@ GUESS_SYSTEM_INSTRUCTION = (
     "EXACTLY one title, copied verbatim from the candidate list given — never invent or "
     "modify a name, and never pick anything not in that list."
 )
+GUESS_SYSTEM_INSTRUCTION = with_content_policy(GUESS_SYSTEM_INSTRUCTION)
 
 
 def _pick_best_guess(gemini_client, shortlist_titles, history_lines):

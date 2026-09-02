@@ -20,6 +20,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 import akinator_mode  # reuses its already-loaded ALL_TITLES as a fallback candidate pool
+from content_policy import with_content_policy
 
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 768
@@ -60,6 +61,7 @@ SYSTEM_INSTRUCTION = (
     "recap of the WHOLE campaign so far (not just this chapter) so future chapters can pick up "
     "the thread without re-reading full chapter text."
 )
+SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
 
 def _dedupe_titles(documents, metadatas):
