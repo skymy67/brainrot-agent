@@ -5,9 +5,9 @@ Two independent pieces per request:
   1. A single structured Gemini call generates the character's 1-2 Pokémon Types, six battle
      stats (HP/Attack/Defense/Special Attack/Special Defense/Speed) — each with its own
      one-sentence reasoning, not just a bare number — 2-4 flavored moves (each with its own
-     Pokémon Type, power, accuracy, and effect), and flavor text — grounded in wiki context,
-     falling back to inferring from appearance/size/lore (and saying so, per-stat) when the wiki
-     doesn't document a stat directly.
+     Pokémon Type, power, accuracy, and effect), a Battle Ability, a Signature Move, and flavor
+     text — grounded in wiki context, falling back to inferring from appearance/size/lore (and
+     saying so, per-stat) when the wiki doesn't document a stat directly.
   2. A rarity tier, reusing rarity_mode.py's own scoring pipeline directly (its hardcoded-OG and
      known-game-rarity lookups first, cost-free; a search-grounded call only when neither hits) —
      not duplicated here, and not cached anywhere (this app has no persistence for that), so a
@@ -18,6 +18,21 @@ A character's own type(s) and every move's type are drawn from ONE shared fixed 
 18 standard Pokémon types (rpg_types.POKEMON_TYPES) — given to the model in the prompt and
 verified against that same list afterward — same defense-in-depth pattern evolution_mode.py uses
 for its model-picked titles — so a hallucinated type name can never leak into the output.
+
+Battle Ability vs. Signature Move: two deliberately different kinds of ability, generated
+together in the same call but validated differently.
+  - Battle Ability is mechanical and closed-vocabulary — generated from exactly one of
+    battle_abilities.BATTLE_ABILITY_CATEGORIES (stat boost, damage modifier, status effect,
+    passive resistance, healing, priority), each with its own tunable magnitude range defined in
+    that config file. Every field (category, target stat/type/status, direction) is re-matched
+    against its own fixed vocabulary in code — same defense-in-depth pattern as Pokémon Types —
+    so it stays "usable directly in battle calculations" (structured, numeric, closed-vocabulary)
+    even though no actual battle engine consumes it yet; this is presentational for now, shaped
+    so a future one could.
+  - Signature Move is the opposite on purpose: a one-off active ability with NO fixed category,
+    generated from whatever standout trait (if any) is actually in this specific character's own
+    wiki lore/personality/role. When no standout trait exists, the model is instructed to say so
+    explicitly (is_generic + basis) rather than fabricate an elaborate ability to compensate.
 
 History: this used to be a two-layer custom system (a small "Brainrot Type" habitat/identity
 layer plus a separate "Battle Type" combat layer with its own custom effectiveness chart).
@@ -31,13 +46,16 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
+import battle_abilities
 import rarity_mode
 import rpg_types
 from content_policy import with_content_policy
 
 GEMINI_MODEL = "gemini-3.6-flash"
 DEX_THINKING_BUDGET = 640
-DEX_MAX_OUTPUT_TOKENS = 1536
+# Bumped from 1536 alongside adding battle_ability + signature_move to the schema — more
+# structured fields to fill in per response, same thinking budget.
+DEX_MAX_OUTPUT_TOKENS = 2048
 MIN_MOVES = 2
 MAX_MOVES = 4
 MAX_TYPES = 2
@@ -75,11 +93,54 @@ class StatsOutput(BaseModel):
     speed: StatValue
 
 
+class BattleAbilityOutput(BaseModel):
+    """A mechanical, stat-based passive effect, generated from exactly one of
+    battle_abilities.BATTLE_ABILITY_CATEGORIES. Which target_* field is meaningful depends on the
+    category (e.g. only stat_boost uses target_stat) — see _validate_battle_ability, which blanks
+    out whichever fields don't apply to the chosen category rather than trusting the model to
+    leave them empty on its own."""
+
+    name: str
+    category: str  # one of battle_abilities.BATTLE_ABILITY_CATEGORIES
+    trigger_condition: str  # e.g. "always", "when HP is below 30%", "when hit by a Water-type move"
+    target_stat: str = ""  # stat_boost only — one of the six stat keys (see STAT_LABELS)
+    target_type: str = ""  # damage_modifier / passive_resistance only — a Pokémon Type
+    target_status: str = ""  # status_effect only — one of battle_abilities.STATUS_EFFECTS
+    # increase/decrease for damage_modifier, inflict/resist for status_effect; "" for every
+    # other category (see battle_abilities.DIRECTION_OPTIONS_BY_CATEGORY).
+    direction: str = ""
+    magnitude: float = 0.0  # percent value, clamped to the category's MAGNITUDE_RANGES
+    # One-sentence plain-language mechanical summary with the actual numbers in it, e.g.
+    # "+20% Speed when HP is below 30%" — this is what gets displayed; the fields above exist so
+    # the same ability is also usable programmatically by a future damage/turn calculation.
+    effect_description: str
+
+
+class SignatureMoveOutput(BaseModel):
+    """A unique, named active ability tied to a standout trait from the character's own lore —
+    deliberately NOT drawn from a fixed category list the way Battle Ability is, since the whole
+    point is that it's specific to this one character."""
+
+    name: str
+    effect_description: str  # one concrete mechanical effect, e.g. bonus damage or a one-time buff
+    power: int = 0  # 0 when the move isn't framed as a direct attack (e.g. a pure buff)
+    accuracy: int = 0  # 0 when power is also 0
+    # True when the wiki lore had no standout trait to draw from, so a simpler generic move was
+    # generated instead of fabricating an elaborate one — set honestly, never left False by default
+    # when the model itself had nothing distinctive to draw from.
+    is_generic: bool = False
+    # Required: the specific lore detail/catchphrase/role this move is drawn from, OR — when
+    # is_generic is true — a short explanation of why no standout trait was available.
+    basis: str = ""
+
+
 class DexEntryOutput(BaseModel):
     types: list[str]  # 1-2 entries after validation
     flavor_text: str
     stats: StatsOutput
     moves: list[MoveOutput]
+    battle_ability: BattleAbilityOutput
+    signature_move: SignatureMoveOutput
     # "" when the type(s) and moves were all grounded in documented wiki lore; otherwise a short
     # note on what else had to be inferred and why — never invented silently. Per-stat inference
     # reasoning lives on each StatValue instead; this covers everything else.
@@ -108,18 +169,57 @@ SYSTEM_INSTRUCTION = (
     "high-risk moves), and a one-line effect description. Moves must be flavored to this "
     "specific character's lore, personality, and appearance — never generic filler moves a "
     "different character could equally have.\n"
-    "4) flavor_text: exactly 1-2 sentences, in an in-universe Pokédex-entry tone."
+    "4) flavor_text: exactly 1-2 sentences, in an in-universe Pokédex-entry tone.\n"
+    "5) battle_ability: ONE mechanical passive ability that plugs directly into battle "
+    "calculations, chosen from the fixed effect categories given in the prompt — pick exactly "
+    "one category, never combine two. Fill in: a short thematic name; trigger_condition (e.g. "
+    "'always', 'when HP is below 30%', 'when hit by a Water-type move'); whichever target field "
+    "that category actually needs (a stat, a Pokémon Type, or a status, from the vocabularies "
+    "given — leave the others blank); a direction where the category needs one (increase/"
+    "decrease for damage_modifier, inflict/resist for status_effect); a magnitude value within "
+    "that category's given range; and effect_description stating the exact numeric effect in "
+    "plain language (e.g. '+20% Speed when HP is below 30%', '-25% damage taken from Water-type "
+    "moves'). Thematically match the category and target to the character (e.g. a Water-type "
+    "character resisting Water damage, a scrappy small character with a Speed boost when low on "
+    "HP) — never pick a category or target arbitrarily.\n"
+    "6) signature_move: ONE unique, named active ability tied specifically to a standout trait "
+    "from THIS character's own wiki lore, personality, catchphrase, or role — something a "
+    "generic template couldn't produce for a different character (e.g. a character known for "
+    "commanding allies gets a reinforcements-style bonus-damage move; a character with a "
+    "specific signature action in their lore gets that action turned into a mechanical effect). "
+    "Give it one concrete mechanical effect (bonus damage, a one-time buff, or a special attack "
+    "with its own power/accuracy) and cite the specific lore detail it's drawn from in `basis`. "
+    "If the wiki context genuinely has no standout, distinctive trait to draw from, do NOT "
+    "fabricate an elaborate move to compensate — set is_generic to true, generate a simpler, "
+    "more generic active move instead, and say so explicitly in `basis` (e.g. 'No standout lore "
+    "trait found for this character; a generic all-purpose strike was used instead')."
 )
 SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
 
+def _format_battle_ability_categories():
+    lines = []
+    for category in battle_abilities.BATTLE_ABILITY_CATEGORIES:
+        low, high = battle_abilities.MAGNITUDE_RANGES[category]
+        magnitude_note = "no numeric magnitude" if (low, high) == (0, 0) else f"magnitude range {low}-{high}%"
+        directions = battle_abilities.DIRECTION_OPTIONS_BY_CATEGORY.get(category)
+        direction_note = f", direction: {'/'.join(directions)}" if directions else ""
+        lines.append(f"- {category}: {battle_abilities.CATEGORY_DESCRIPTIONS[category]} ({magnitude_note}{direction_note})")
+    return "\n".join(lines)
+
+
 def _build_prompt(character_name, wiki_context):
+    stat_keys = ", ".join(attr for _, attr in STAT_LABELS)
     return (
         f"Context from the Italian Brainrot wiki:\n\n"
         f"{wiki_context or '(no wiki data found for this character)'}\n\n"
         f"Character: {character_name}\n\n"
         f"Pokémon Types (pick 1-2 for the character; moves may use any of these too): "
         f"{', '.join(rpg_types.POKEMON_TYPES)}\n\n"
+        f"Battle Ability effect categories (pick exactly one):\n{_format_battle_ability_categories()}\n\n"
+        f"Stat names, for the stat_boost category's target_stat only: {stat_keys}\n\n"
+        f"Statuses, for the status_effect category's target_status only: "
+        f"{', '.join(battle_abilities.STATUS_EFFECTS)}\n\n"
         f"Generate the Dex Entry data per your instructions."
     )
 
@@ -149,6 +249,61 @@ def _clamp(value, low, high, default):
         return max(low, min(high, int(value)))
     except (TypeError, ValueError):
         return default
+
+
+def _clamp_magnitude(value, category):
+    low, high = battle_abilities.MAGNITUDE_RANGES.get(category, (0, 0))
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return float(low)
+
+
+def _validate_battle_ability(raw: BattleAbilityOutput) -> BattleAbilityOutput:
+    """Same defense-in-depth pattern as _match_types/_clamp above: every field is re-matched
+    against its own fixed vocabulary (from battle_abilities.py) or numeric range, and any field
+    that doesn't apply to the chosen category is forced blank rather than trusting the model to
+    have left it that way on its own."""
+    category = _match_from_list(raw.category, battle_abilities.BATTLE_ABILITY_CATEGORIES, battle_abilities.FALLBACK_CATEGORY)
+
+    stat_keys = [attr for _, attr in STAT_LABELS]
+    target_stat = _match_from_list(raw.target_stat, stat_keys, stat_keys[0]) if category == "stat_boost" else ""
+    target_type = (
+        _match_from_list(raw.target_type, rpg_types.POKEMON_TYPES, FALLBACK_TYPE)
+        if category in ("damage_modifier", "passive_resistance")
+        else ""
+    )
+    target_status = (
+        _match_from_list(raw.target_status, battle_abilities.STATUS_EFFECTS, battle_abilities.STATUS_EFFECTS[0])
+        if category == "status_effect"
+        else ""
+    )
+
+    valid_directions = battle_abilities.DIRECTION_OPTIONS_BY_CATEGORY.get(category)
+    direction = _match_from_list(raw.direction, valid_directions, valid_directions[0]) if valid_directions else ""
+
+    return BattleAbilityOutput(
+        name=(raw.name or "Unnamed Ability").strip(),
+        category=category,
+        trigger_condition=(raw.trigger_condition or "").strip() or "always",
+        target_stat=target_stat,
+        target_type=target_type,
+        target_status=target_status,
+        direction=direction,
+        magnitude=_clamp_magnitude(raw.magnitude, category),
+        effect_description=(raw.effect_description or "").strip(),
+    )
+
+
+def _validate_signature_move(raw: SignatureMoveOutput) -> SignatureMoveOutput:
+    return SignatureMoveOutput(
+        name=(raw.name or "Unnamed Move").strip(),
+        effect_description=(raw.effect_description or "").strip(),
+        power=_clamp(raw.power, 0, POWER_MAX, 0),
+        accuracy=_clamp(raw.accuracy, 0, ACCURACY_MAX, 0),
+        is_generic=bool(raw.is_generic),
+        basis=(raw.basis or "").strip(),
+    )
 
 
 def generate_dex_data(gemini_client, character_name, wiki_context):
@@ -204,6 +359,8 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
         flavor_text=(parsed.flavor_text or "").strip(),
         stats=stats,
         moves=moves,
+        battle_ability=_validate_battle_ability(parsed.battle_ability),
+        signature_move=_validate_signature_move(parsed.signature_move),
         inferred_note=(parsed.inferred_note or "").strip(),
     )
 
@@ -267,6 +424,10 @@ def format_dex_entry(character_name, dex: DexEntryOutput, tier):
         lines.append(f"**{label}:** {stat.value}/100 — {stat.reasoning}")
     lines.append("")
     lines.append(f"Rarity: {tier}")
+    lines.append("")
+    lines.append(f"**Battle Ability:** {dex.battle_ability.name} — {dex.battle_ability.effect_description}")
+    signature_note = " *(generic — " + dex.signature_move.basis + ")*" if dex.signature_move.is_generic and dex.signature_move.basis else ""
+    lines.append(f"**Signature Move:** {dex.signature_move.name} — {dex.signature_move.effect_description}{signature_note}")
     lines.append("")
     lines.append("Moves:")
     lines.append(move_lines if move_lines else "(none generated)")
