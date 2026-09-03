@@ -8,11 +8,13 @@ Two independent pieces per request:
      Pokémon Type, power, accuracy, and effect), a Battle Ability, a Signature Move, and flavor
      text — grounded in wiki context, falling back to inferring from appearance/size/lore (and
      saying so, per-stat) when the wiki doesn't document a stat directly.
-  2. A rarity tier, reusing rarity_mode.py's own scoring pipeline directly (its hardcoded-OG and
-     known-game-rarity lookups first, cost-free; a search-grounded call only when neither hits) —
-     not duplicated here, and not cached anywhere (this app has no persistence for that), so a
-     character without a hardcoded/known rarity costs 2 extra Gemini calls beyond the Dex Entry
-     call itself for its tier.
+  2. A rarity tier, reusing only rarity_mode.py's two free lookups (hardcoded-OG list, then
+     known-game-rarity list) — no Gemini call, no cost. Deliberately does NOT fall through to
+     Rarity Mode's own search-grounded guess for a character in neither list; that would add a
+     second, heavier Gemini call (plus its own web-search tool call) on top of the Dex Entry
+     call this mode already makes, tripling exposure to Gemini's transient-overload errors for a
+     value that's a guess anyway. A character not in either free list shows "Unknown" instead —
+     ask Rarity Mode directly if you want its full search-grounded estimate.
 
 A character's own type(s) and every move's type are drawn from ONE shared fixed vocabulary — the
 18 standard Pokémon types (rpg_types.POKEMON_TYPES) — given to the model in the prompt and
@@ -42,7 +44,6 @@ entirely (confirmed with the user) rather than kept as flavor, since 1-2 real Po
 already carry all the identity information it used to add.
 """
 
-from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
@@ -50,6 +51,7 @@ import battle_abilities
 import rarity_mode
 import rpg_types
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 GEMINI_MODEL = "gemini-3.6-flash"
 DEX_THINKING_BUDGET = 640
@@ -312,7 +314,7 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
     callers never need to re-validate the result themselves. Returns None if the model's
     response didn't parse against the schema at all (e.g. cut off before finishing) — genuinely
     rare with schema-enforced output, but not impossible."""
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=_build_prompt(character_name, wiki_context),
         config=types.GenerateContentConfig(
@@ -322,7 +324,7 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
             response_mime_type="application/json",
             response_schema=DexEntryOutput,
         ),
-    )
+    ))
     parsed = response.parsed
     if parsed is None:
         return None
@@ -365,38 +367,19 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
     )
 
 
-def compute_rarity_tier(gemini_client, character_name, wiki_context):
-    """Reuses rarity_mode.py's own pipeline stages directly (hardcoded OG list, then known-
-    game-rarity list — both free lookups — then its search-grounded fallback) to get just the
-    tier string for the Dex Entry's compact stat block, rather than Rarity Mode's own full
-    formatted explanation paragraph, which belongs to Rarity Mode's own output, not this one."""
+def compute_rarity_tier(character_name):
+    """Reuses rarity_mode.py's two free lookups (hardcoded OG list, then known-game-rarity list)
+    for the Dex Entry's compact stat block. Deliberately does NOT fall through to Rarity Mode's
+    search-grounded guess for everything else — that's a live Gemini call (with its own
+    web-search tool call layered on top), and RPG Mode already makes its own separate Gemini call
+    for the rest of the Dex Entry; stacking a second, heavier call onto every character not in
+    one of the two free lists tripled this mode's exposure to Gemini's own transient-overload
+    errors (see gemini_retry.py) for a value that's a guess anyway. Returns None when neither
+    free lookup hits — format_dex_entry shows "Unknown" rather than spending an extra call to
+    guess at one."""
     if rarity_mode.check_hardcoded_og(character_name):
         return "OG"
-
-    known = rarity_mode.check_known_game_rarity(character_name)
-    if known:
-        return known
-
-    try:
-        search_result = rarity_mode.run_og_and_rarity_search(gemini_client, character_name, wiki_context)
-    except genai_errors.APIError as exc:
-        # Mirrors rarity_mode.run_rarity_pipeline's own fallback for this exact failure —
-        # constructed directly rather than reaching into its private _unavailable_search_result
-        # helper, using only the module's public class/function surface.
-        reason = f"API error {exc.code}"
-        search_result = rarity_mode.OgAndRaritySearchResult(
-            is_og=False,
-            og_reasoning=f"Could not determine OG status ({reason}).",
-            existing_game_rarity_found=False,
-            existing_game_rarity="",
-            existing_game_rarity_reasoning=f"Existing-rarity search unavailable ({reason}).",
-        )
-
-    if search_result.is_og:
-        return "OG"
-
-    score_result = rarity_mode.run_final_scoring(gemini_client, character_name, wiki_context, search_result, None, None)
-    return rarity_mode.score_to_tier(score_result.total_score, score_result.categories_maxed)
+    return rarity_mode.check_known_game_rarity(character_name)
 
 
 # (label, StatsOutput attribute name) — spelled out in full rather than abbreviated (HP/ATK/DEF/
@@ -423,7 +406,7 @@ def format_dex_entry(character_name, dex: DexEntryOutput, tier):
         stat = getattr(stats, attr)
         lines.append(f"**{label}:** {stat.value}/100 — {stat.reasoning}")
     lines.append("")
-    lines.append(f"Rarity: {tier}")
+    lines.append(f"Rarity: {tier or 'Unknown'}")
     lines.append("")
     lines.append(f"**Battle Ability:** {dex.battle_ability.name} — {dex.battle_ability.effect_description}")
     signature_note = " *(generic — " + dex.signature_move.basis + ")*" if dex.signature_move.is_generic and dex.signature_move.basis else ""
@@ -446,5 +429,5 @@ def build_dex_entry(gemini_client, character_name, wiki_context):
     dex = generate_dex_data(gemini_client, character_name, wiki_context)
     if dex is None:
         return f"Couldn't generate a Dex Entry for {character_name} — try asking again."
-    tier = compute_rarity_tier(gemini_client, character_name, wiki_context)
+    tier = compute_rarity_tier(character_name)
     return format_dex_entry(character_name, dex, tier)

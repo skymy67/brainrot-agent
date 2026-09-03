@@ -20,10 +20,10 @@ from sentence_transformers import SentenceTransformer
 import akinator_mode
 import craft_mode
 import evolution_mode
-import quest_mode
 import rarity_mode
 import rpg_mode
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 # Points at a Railway volume in production (set via the DATA_DIR env var) so chroma_db survives
 # redeploys instead of rebuilding from scratch on every one; defaults to the working directory
@@ -205,9 +205,6 @@ class ChatRequest(BaseModel):
     # of living in server memory.
     akinator_answer: str | None = None
     akinator_state: dict | None = None
-    # Quest Mode only: same round-tripped-state pattern as Akinator above. question doubles as
-    # the adventure brief on the first turn and the player's next move/steer on later turns.
-    quest_state: dict | None = None
 
 
 class Source(BaseModel):
@@ -219,7 +216,6 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source]
     akinator_state: dict | None = None
-    quest_state: dict | None = None
 
 
 def retrieve_chunks(question, top_k=TOP_K):
@@ -276,18 +272,17 @@ def dedupe_sources(metadatas):
 
 
 def handle_gemini_errors(fn):
+    # By the time an exception reaches here, call_with_retry has already retried a 429/503 a
+    # few times with backoff (see gemini_retry.py) — this only fires once those retries are
+    # genuinely exhausted, so the friendly message below is the honest "still busy after
+    # several tries" case, not a first-attempt failure.
     try:
         return fn()
     except genai_errors.APIError as exc:
-        if exc.code == 429:
-            raise HTTPException(
-                status_code=429,
-                detail="Gemini API rate limit reached. Wait a bit and try again.",
-            ) from exc
-        if exc.code == 503:
+        if exc.code in (429, 503):
             raise HTTPException(
                 status_code=503,
-                detail="Gemini is temporarily overloaded. Try again in a moment.",
+                detail="The AI is a bit busy right now, please try again in a moment.",
             ) from exc
         raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
 
@@ -369,23 +364,6 @@ def chat(request: ChatRequest):
         )
         return ChatResponse(answer=answer, sources=[], akinator_state=akinator_state)
 
-    if request.mode == "quest":
-        # Stateful and round-tripped through the client exactly like Akinator Mode above.
-        # request.question doubles as the adventure brief (no quest_state yet) or the player's
-        # next move/steer (mid-campaign). Retrieval stays anchored to the campaign's own goal on
-        # later turns (rather than just the latest short player message) so it keeps surfacing
-        # thematically relevant — but still unseen — Brainrots chapter after chapter.
-        prior_state = request.quest_state
-        query = request.question if prior_state is None else f"{prior_state.get('goal', '')} {request.question}".strip()
-        documents, metadatas = retrieve_chunks(query, top_k=quest_mode.CANDIDATES_PER_CHAPTER)
-
-        answer, quest_state = handle_gemini_errors(
-            lambda: quest_mode.process_turn(
-                gemini_client, prior_state, request.question, documents, metadatas
-            )
-        )
-        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas), quest_state=quest_state)
-
     if request.mode not in MODES:
         raise HTTPException(status_code=400, detail=f"Unknown mode '{request.mode}'.")
     mode = MODES[request.mode]
@@ -426,7 +404,7 @@ def chat(request: ChatRequest):
         contents = user_message
 
     response = handle_gemini_errors(
-        lambda: gemini_client.models.generate_content(
+        lambda: call_with_retry(lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
             config=types.GenerateContentConfig(
@@ -434,7 +412,7 @@ def chat(request: ChatRequest):
                 max_output_tokens=mode["max_output_tokens"],
                 thinking_config=types.ThinkingConfig(thinking_budget=mode["thinking_budget"]),
             ),
-        )
+        ))
     )
 
     answer = response.text or "The model didn't return a response — try asking again."

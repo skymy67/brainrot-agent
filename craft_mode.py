@@ -21,6 +21,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 512
@@ -102,7 +103,7 @@ def generate_recipe(gemini_client, character_name, wiki_context, image_bytes=Non
     else:
         contents = prompt_text
 
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -112,7 +113,7 @@ def generate_recipe(gemini_client, character_name, wiki_context, image_bytes=Non
             response_mime_type="application/json",
             response_schema=CraftRecipeOutput,
         ),
-    )
+    ))
     return response.parsed
 
 

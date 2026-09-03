@@ -50,6 +50,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 # Points at a Railway volume in production (set via the DATA_DIR env var) so the learned tag
 # stats below survive redeploys; defaults to the working directory for local dev, same as
@@ -652,7 +653,7 @@ def _phrase_question(gemini_client, tag, history_lines):
         f"Write one short yes/no question asking whether the player's character has this trait."
     )
     try:
-        response = gemini_client.models.generate_content(
+        response = call_with_retry(lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -662,7 +663,7 @@ def _phrase_question(gemini_client, tag, history_lines):
                 response_mime_type="application/json",
                 response_schema=QuestionPhrasing,
             ),
-        )
+        ))
     except genai_errors.APIError:
         return _fallback_question_text(tag)
 
@@ -699,7 +700,7 @@ def _pick_best_guess(gemini_client, shortlist_titles, history_lines):
         f"Pick the single candidate that best matches all the answers given."
     )
     try:
-        response = gemini_client.models.generate_content(
+        response = call_with_retry(lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -709,7 +710,7 @@ def _pick_best_guess(gemini_client, shortlist_titles, history_lines):
                 response_mime_type="application/json",
                 response_schema=GuessPick,
             ),
-        )
+        ))
     except genai_errors.APIError:
         return shortlist_titles[0]
 
