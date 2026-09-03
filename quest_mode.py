@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 import akinator_mode  # reuses its already-loaded ALL_TITLES as a fallback candidate pool
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 768
@@ -100,7 +101,7 @@ def _format_candidates(titles, docs_by_title):
 
 
 def _call_gemini(gemini_client, prompt):
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -110,7 +111,7 @@ def _call_gemini(gemini_client, prompt):
             response_mime_type="application/json",
             response_schema=QuestChapterOutput,
         ),
-    )
+    ))
     return response.parsed
 
 

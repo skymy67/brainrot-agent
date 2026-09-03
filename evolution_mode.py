@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 import rarity_mode
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 640
@@ -83,7 +84,7 @@ def _build_prompt(character_name, wiki_context, candidate_titles):
 
 
 def select_real_stages(gemini_client, character_name, wiki_context, candidate_titles):
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=_build_prompt(character_name, wiki_context, candidate_titles),
         config=types.GenerateContentConfig(
@@ -93,7 +94,7 @@ def select_real_stages(gemini_client, character_name, wiki_context, candidate_ti
             response_mime_type="application/json",
             response_schema=EvolutionSelection,
         ),
-    )
+    ))
     return response.parsed
 
 

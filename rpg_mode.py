@@ -50,6 +50,7 @@ import battle_abilities
 import rarity_mode
 import rpg_types
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 GEMINI_MODEL = "gemini-3.6-flash"
 DEX_THINKING_BUDGET = 640
@@ -312,7 +313,7 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
     callers never need to re-validate the result themselves. Returns None if the model's
     response didn't parse against the schema at all (e.g. cut off before finishing) — genuinely
     rare with schema-enforced output, but not impossible."""
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=_build_prompt(character_name, wiki_context),
         config=types.GenerateContentConfig(
@@ -322,7 +323,7 @@ def generate_dex_data(gemini_client, character_name, wiki_context):
             response_mime_type="application/json",
             response_schema=DexEntryOutput,
         ),
-    )
+    ))
     parsed = response.parsed
     if parsed is None:
         return None

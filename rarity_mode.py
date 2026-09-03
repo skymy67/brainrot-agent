@@ -21,6 +21,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 # --- Config: easy to extend later ---------------------------------------------------
 
@@ -450,7 +451,7 @@ def run_og_and_rarity_search(gemini_client: "genai.Client", character_name, wiki
         f'"existing_game_rarity": str, "existing_game_rarity_reasoning": str}}'
     )
 
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -459,7 +460,7 @@ def run_og_and_rarity_search(gemini_client: "genai.Client", character_name, wiki
             thinking_config=types.ThinkingConfig(thinking_budget=SEARCH_THINKING_BUDGET),
             max_output_tokens=SEARCH_MAX_OUTPUT_TOKENS,
         ),
-    )
+    ))
     return parse_og_and_rarity_json(response.text)
 
 
@@ -539,7 +540,7 @@ def run_final_scoring(gemini_client: "genai.Client", character_name, wiki_contex
         )
         prompt_parts.insert(1, types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
 
-    response = gemini_client.models.generate_content(
+    response = call_with_retry(lambda: gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=types.Content(parts=prompt_parts),
         config=types.GenerateContentConfig(
@@ -553,7 +554,7 @@ def run_final_scoring(gemini_client: "genai.Client", character_name, wiki_contex
             response_mime_type="application/json",
             response_schema=RarityScoreResult,
         ),
-    )
+    ))
     if response.parsed is None:
         return RarityScoreResult(
             tier="Common",

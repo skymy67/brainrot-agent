@@ -24,6 +24,7 @@ import quest_mode
 import rarity_mode
 import rpg_mode
 from content_policy import with_content_policy
+from gemini_retry import call_with_retry
 
 # Points at a Railway volume in production (set via the DATA_DIR env var) so chroma_db survives
 # redeploys instead of rebuilding from scratch on every one; defaults to the working directory
@@ -276,18 +277,17 @@ def dedupe_sources(metadatas):
 
 
 def handle_gemini_errors(fn):
+    # By the time an exception reaches here, call_with_retry has already retried a 429/503 a
+    # few times with backoff (see gemini_retry.py) — this only fires once those retries are
+    # genuinely exhausted, so the friendly message below is the honest "still busy after
+    # several tries" case, not a first-attempt failure.
     try:
         return fn()
     except genai_errors.APIError as exc:
-        if exc.code == 429:
-            raise HTTPException(
-                status_code=429,
-                detail="Gemini API rate limit reached. Wait a bit and try again.",
-            ) from exc
-        if exc.code == 503:
+        if exc.code in (429, 503):
             raise HTTPException(
                 status_code=503,
-                detail="Gemini is temporarily overloaded. Try again in a moment.",
+                detail="The AI is a bit busy right now, please try again in a moment.",
             ) from exc
         raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
 
@@ -426,7 +426,7 @@ def chat(request: ChatRequest):
         contents = user_message
 
     response = handle_gemini_errors(
-        lambda: gemini_client.models.generate_content(
+        lambda: call_with_retry(lambda: gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
             config=types.GenerateContentConfig(
@@ -434,7 +434,7 @@ def chat(request: ChatRequest):
                 max_output_tokens=mode["max_output_tokens"],
                 thinking_config=types.ThinkingConfig(thinking_budget=mode["thinking_budget"]),
             ),
-        )
+        ))
     )
 
     answer = response.text or "The model didn't return a response — try asking again."
