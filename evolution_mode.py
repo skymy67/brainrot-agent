@@ -6,6 +6,25 @@ to pick from an explicit candidate list drawn from the wiki's own RAG retrieval 
 asked to free-generate a name), and every title it returns is verified against that list in
 code before being used. If nothing real fits, the mode says the character has no evolution
 line instead of inventing or loosely matching a name to fill a slot.
+
+Each stage transition also gets an evolution METHOD, not just a level. 'level' is the default,
+unchanged from before (the existing tier-nudged 1 / 14 / 30 progression). The model may instead
+pick 'stone' (grounded in the arriving candidate's own established elemental/thematic identity —
+using the real Pokémon evolution stone names, not invented ones), 'trade' (grounded in a
+documented duo/pairing/exchange relationship with another character), or 'friendship' (grounded
+in documented loyalty/bonding/being-raised-by-someone) — always requiring a one-line citation of
+the specific wiki detail behind the pick, exactly like Signature Move's is_generic/basis in
+rpg_mode.py. No evidence, no non-level method — same "never invent" rule as everything else
+here. A stone/trade/friendship stage shows that method instead of a level number, matching how
+none of those three use a level requirement in real Pokémon either.
+
+Each StageSelection's method describes how THAT stage is reached from whatever immediately
+precedes it in the final chain — uniform in both directions (prevolutions and evolutions alike).
+Since the target character itself has no list entry of its own, its arrival method (relevant
+only when it actually has a prevolution to arrive from) is carried separately on
+EvolutionSelection.target_method/target_stone/target_reasoning. The very first stage in the
+whole chain never has a real arrival method (nothing precedes it) and always renders as the
+plain starting level, regardless of anything selected for it.
 """
 
 from typing import Literal
@@ -24,11 +43,37 @@ MAX_STAGES_PER_SIDE = 2
 
 HIGH_TIER_RARITIES = {"Legendary", "Mythic", "Brainrot God", "Secret"}
 
+EVOLUTION_METHODS = ["level", "stone", "trade", "friendship"]
+FALLBACK_METHOD = "level"  # the safe default whenever a claimed method can't be trusted
+
+# The real Pokémon evolution stones, reused end to end instead of inventing brainrot-flavored
+# ones — same reasoning as rpg_types.POKEMON_TYPES: one shared, real vocabulary rather than a
+# custom one, so a "stone" method's stone name is always something recognizable.
+EVOLUTION_STONES = [
+    "Fire Stone", "Water Stone", "Thunder Stone", "Leaf Stone", "Moon Stone",
+    "Sun Stone", "Shiny Stone", "Dusk Stone", "Dawn Stone", "Ice Stone",
+]
+
+
+class StageSelection(BaseModel):
+    title: str  # must be copied verbatim from the candidate list
+    method: str = FALLBACK_METHOD  # one of EVOLUTION_METHODS — how THIS stage is reached
+    stone: str = ""  # only meaningful when method == "stone" — one of EVOLUTION_STONES
+    # Required whenever method != "level": the specific wiki detail behind the pick. Left "" for
+    # "level", which needs no special justification since it's the default.
+    reasoning: str = ""
+
 
 class EvolutionSelection(BaseModel):
     target_position: Literal["stage1", "middle", "final"]
-    prevolutions: list[str] = []  # earliest-to-latest, must be copied verbatim from the candidate list
-    evolutions: list[str] = []  # earliest-to-latest, must be copied verbatim from the candidate list
+    prevolutions: list[StageSelection] = []  # earliest-to-latest, titles copied verbatim
+    evolutions: list[StageSelection] = []  # earliest-to-latest, titles copied verbatim
+    # How the TARGET character itself is reached — only meaningful (and only worth setting)
+    # when target_position is "middle" or "final", i.e. the target actually has an immediate
+    # prevolution to arrive from. Left at the defaults when target_position is "stage1".
+    target_method: str = FALLBACK_METHOD
+    target_stone: str = ""
+    target_reasoning: str = ""
 
 
 SYSTEM_INSTRUCTION = (
@@ -63,7 +108,26 @@ SYSTEM_INSTRUCTION = (
     "most one of each. Select at most two stages on any one side. If no candidate plausibly "
     "fits a side, leave that list empty rather than forcing a weak match — never pick a "
     "candidate just to fill a slot, and never reject a genuinely valid baby-stage match just "
-    "because a weaker or unrelated candidate also happens to be in the list."
+    "because a weaker or unrelated candidate also happens to be in the list.\n\n"
+    "For every stage you select (each prevolution, each evolution, AND the target's own arrival "
+    "via target_method/target_stone/target_reasoning when it has a prevolution), also decide "
+    "the evolution method by which THAT stage is reached from whatever immediately precedes it "
+    "in the line:\n"
+    "- 'level' — the default. Use this unless a stage clearly qualifies for one of the others "
+    "below.\n"
+    "- 'stone' — use ONLY when the arriving stage's own wiki text clearly establishes a "
+    "specific elemental/thematic identity (e.g. genuinely fire-themed, water-themed, ice-"
+    "themed) that matches one of the real evolution stones given in the prompt. Set 'stone' to "
+    "that single best-matching stone name.\n"
+    "- 'trade' — use ONLY when the arriving stage's own wiki text documents a specific duo, "
+    "pairing, or exchange relationship with another named character.\n"
+    "- 'friendship' — use ONLY when the arriving stage's own wiki text documents loyalty, "
+    "bonding, or being raised/cared for by someone.\n"
+    "Whenever you pick anything other than 'level', you MUST cite the exact wiki detail behind "
+    "that choice in the matching reasoning field — if you can't point to something concrete, "
+    "use 'level' instead. Never pick stone/trade/friendship just to add variety; most stages "
+    "should stay 'level', same as a typical Pokémon line where only some evolutions use a "
+    "special method."
 )
 SYSTEM_INSTRUCTION = with_content_policy(SYSTEM_INSTRUCTION)
 
@@ -78,6 +142,7 @@ def _build_prompt(character_name, wiki_context, candidate_titles):
         f"Target character: {character_name}\n\n"
         f"Candidate real wiki characters (choose ONLY from this list, copy titles exactly as "
         f"written, do not modify or invent any):\n{_format_candidates(candidate_titles)}\n\n"
+        f"Evolution stones (for the 'stone' method's stone field only): {', '.join(EVOLUTION_STONES)}\n\n"
         "Determine the target's own position, then select real prevolution/evolution "
         "candidates from the list above per your instructions."
     )
@@ -98,17 +163,50 @@ def select_real_stages(gemini_client, character_name, wiki_context, candidate_ti
     return response.parsed
 
 
-def _verify_titles(titles, candidate_titles):
+def _verify_method_fields(method, stone, reasoning):
+    """Defense in depth for one stage's evolution-method claim: a method outside
+    EVOLUTION_METHODS falls back to plain level. A non-level method with no reasoning attached
+    is treated as unsubstantiated and also falls back to level — an unbacked trade/friendship/
+    stone claim is never kept just because the model asserted it. A 'stone' claim additionally
+    needs its stone name to match the real vocabulary, or it falls back too (a stone method with
+    an unrecognized stone is worse than just showing a level)."""
+    method = (method or "").strip().lower()
+    if method not in EVOLUTION_METHODS:
+        method = FALLBACK_METHOD
+
+    reasoning = (reasoning or "").strip()
+    if method != "level" and not reasoning:
+        method = FALLBACK_METHOD
+
+    matched_stone = ""
+    if method == "stone":
+        stone_lookup = {s.lower(): s for s in EVOLUTION_STONES}
+        matched_stone = stone_lookup.get((stone or "").strip().lower(), "")
+        if not matched_stone:
+            method = FALLBACK_METHOD
+
+    if method == "level":
+        reasoning = ""
+
+    return method, matched_stone, reasoning
+
+
+def _verify_stages(stages, candidate_titles):
     """Defense in depth: even though the model is instructed to only copy from the candidate
     list, verify every returned title actually matches a real candidate (case-insensitive)
-    before trusting it. Anything that doesn't match exactly — a reworded name, a hallucination
-    despite instructions — is dropped rather than used."""
+    before trusting it — a reworded name, a hallucination despite instructions, is dropped
+    rather than used. Each surviving stage's method/stone/reasoning is separately re-verified
+    via _verify_method_fields."""
     lookup = {title.strip().lower(): title for title in candidate_titles}
     verified = []
-    for title in titles:
-        match = lookup.get(title.strip().lower())
-        if match and match not in verified:
-            verified.append(match)
+    seen = set()
+    for stage in stages:
+        real_title = lookup.get(stage.title.strip().lower())
+        if not real_title or real_title in seen:
+            continue
+        seen.add(real_title)
+        method, stone, reasoning = _verify_method_fields(stage.method, stage.stone, stage.reasoning)
+        verified.append(StageSelection(title=real_title, method=method, stone=stone, reasoning=reasoning))
     return verified[:MAX_STAGES_PER_SIDE]
 
 
@@ -122,9 +220,40 @@ def _assign_levels(stage_count, known_tier=None):
     return levels
 
 
-def _format_line(stage_names, known_tier):
-    levels = _assign_levels(len(stage_names), known_tier)
-    return "\n".join(f"Stage {i + 1}: {name} — Lv {level}" for i, (name, level) in enumerate(zip(stage_names, levels)))
+def _stage_entries(prevolutions, target_name, target_method, target_stone, target_reasoning, evolutions):
+    """Builds (name, method, stone, reasoning) tuples for the whole chain in order. Each
+    prevolution/evolution's own method describes how IT is reached from whatever precedes it —
+    uniform in both directions — and the target's own arrival (only relevant when it has a
+    prevolution) is spliced in from the separate target_method/target_stone/target_reasoning
+    fields, since the target has no list entry of its own. The very first stage in the whole
+    chain never has a real arrival method (nothing precedes it), regardless of what was
+    selected for it, so it's always forced back to a plain level."""
+    entries = [(stage.title, stage.method, stage.stone, stage.reasoning) for stage in prevolutions]
+    if prevolutions:
+        entries.append((target_name, target_method, target_stone, target_reasoning))
+    else:
+        entries.append((target_name, "level", "", ""))
+    entries.extend((stage.title, stage.method, stage.stone, stage.reasoning) for stage in evolutions)
+
+    first_name, _, _, _ = entries[0]
+    entries[0] = (first_name, "level", "", "")
+    return entries
+
+
+def _format_line(entries, known_tier):
+    levels = _assign_levels(len(entries), known_tier)
+    lines = []
+    for i, ((name, method, stone, _reasoning), level) in enumerate(zip(entries, levels)):
+        if method == "stone":
+            requirement = stone or "Stone"
+        elif method == "trade":
+            requirement = "Trade"
+        elif method == "friendship":
+            requirement = "Friendship"
+        else:
+            requirement = f"Lv {level}"
+        lines.append(f"Stage {i + 1}: {name} — {requirement}")
+    return "\n".join(lines)
 
 
 def build_evolution_line(gemini_client, character_name, wiki_context, candidate_titles):
@@ -137,16 +266,20 @@ def build_evolution_line(gemini_client, character_name, wiki_context, candidate_
 
     prevolutions, evolutions = [], []
     if selection.target_position == "stage1":
-        evolutions = _verify_titles(selection.evolutions, candidate_titles)
+        evolutions = _verify_stages(selection.evolutions, candidate_titles)
     elif selection.target_position == "final":
-        prevolutions = _verify_titles(selection.prevolutions, candidate_titles)
+        prevolutions = _verify_stages(selection.prevolutions, candidate_titles)
     else:
-        prevolutions = _verify_titles(selection.prevolutions, candidate_titles)[:1]
-        evolutions = _verify_titles(selection.evolutions, candidate_titles)[:1]
+        prevolutions = _verify_stages(selection.prevolutions, candidate_titles)[:1]
+        evolutions = _verify_stages(selection.evolutions, candidate_titles)[:1]
 
-    stage_names = prevolutions + [character_name] + evolutions
-    if len(stage_names) < 2:
+    if not prevolutions and not evolutions:
         return f"{character_name} has no evolution line."
 
+    target_method, target_stone, target_reasoning = _verify_method_fields(
+        selection.target_method, selection.target_stone, selection.target_reasoning
+    )
+    entries = _stage_entries(prevolutions, character_name, target_method, target_stone, target_reasoning, evolutions)
+
     known_tier = rarity_mode.check_known_game_rarity(character_name)
-    return _format_line(stage_names, known_tier)
+    return _format_line(entries, known_tier)
