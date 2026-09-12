@@ -49,7 +49,8 @@ MAX_STAGES_PER_SIDE = 2
 # model can still slip, so a candidate whose own wiki content opens by describing it as a
 # relative OF a named character is rejected in code rather than trusted on the prompt alone.
 FAMILY_RELATION_RE = re.compile(
-    r"(?i)\b(daughters?|sons?|sisters?|brothers?|wife|wives|husbands?|cousins?|nieces?|nephews?|mothers?|fathers?)\s+of\b"
+    r"(?i)\b(daughters?|sons?|sisters?|brothers?|wife|wives|husbands?|cousins?|nieces?|nephews?|mothers?|fathers?|"
+    r"child|children)\s+of\b"
 )
 # Only checked near the start of a candidate's own content — this is where a wiki page states
 # what/who a character fundamentally IS, not incidental later mentions of some other relation.
