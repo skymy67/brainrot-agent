@@ -27,11 +27,13 @@ whole chain never has a real arrival method (nothing precedes it) and always ren
 plain starting level, regardless of anything selected for it.
 """
 
+import re
 from typing import Literal
 
 from google.genai import types
 from pydantic import BaseModel
 
+import akinator_mode
 import rarity_mode
 from content_policy import with_content_policy
 from gemini_retry import call_with_retry
@@ -40,6 +42,18 @@ GEMINI_MODEL = "gemini-3.6-flash"
 THINKING_BUDGET = 640
 MAX_OUTPUT_TOKENS = 1024
 MAX_STAGES_PER_SIDE = 2
+
+# Defense in depth for the same "family member mistaken for a life stage" mistake the prompt
+# above now also warns against (e.g. Las Tralaleritas, documented as Tralalero Tralala's
+# daughters, being picked as if it were a younger Tralalero Tralala): even a well-instructed
+# model can still slip, so a candidate whose own wiki content opens by describing it as a
+# relative OF a named character is rejected in code rather than trusted on the prompt alone.
+FAMILY_RELATION_RE = re.compile(
+    r"(?i)\b(daughters?|sons?|sisters?|brothers?|wife|wives|husbands?|cousins?|nieces?|nephews?|mothers?|fathers?)\s+of\b"
+)
+# Only checked near the start of a candidate's own content — this is where a wiki page states
+# what/who a character fundamentally IS, not incidental later mentions of some other relation.
+FAMILY_RELATION_CHECK_WINDOW = 400
 
 HIGH_TIER_RARITIES = {"Legendary", "Mythic", "Brainrot God", "Secret"}
 
@@ -94,11 +108,23 @@ SYSTEM_INSTRUCTION = (
     "versions of the target despite being worded as its 'children' in their own summary. Judge "
     "each candidate on its actual content instead:\n"
     "- Look for this wiki's own 'Category:Baby' or 'Category:Bambino' tag, usually listed near "
-    "the end of a page's content — this is the wiki's own first-party signal that a page is a "
-    "genuine baby/early-life-stage version of another character, and should be weighed heavily "
-    "even if the page's summary text uses looser family language like 'children of X'.\n"
+    "the end of a page's content — a useful first-party signal, but NOT enough on its own: this "
+    "tag also gets applied to characters who are a named adult character's actual children, "
+    "siblings, or cousins (a separate family, not a young form of that adult). A candidate is "
+    "only a genuine life-stage match if it's presented as literally being the SAME individual, "
+    "just younger — no established identity, name, or relationships of its own beyond being "
+    "'young [target]'.\n"
+    "- If a candidate's own text instead introduces it via an explicit family relationship — a "
+    "daughter, son, sister, brother, wife, husband, or cousin OF a named character, especially "
+    "phrased in the plural ('the daughters of X' rather than 'a young X') — that describes a "
+    "separate family member, not a growth stage. A real evolution line is always one individual "
+    "growing up (a small bear eventually becomes a bear — the same bear), never a parent's own "
+    "children evolving into the parent. Reject a candidate like this even when a Baby/Bambino "
+    "tag is present.\n"
     "- Also look for explicit prose describing the candidate as a baby/young version of the "
-    "target (e.g. a History section noting it originated as 'baby versions of [target]').\n"
+    "target (e.g. a History section noting it originated as 'baby versions of [target]') — this "
+    "is positive evidence, separate from and not overridden by any family-relationship framing "
+    "above.\n"
     "- A candidate with NEITHER a Baby/Bambino category NOR any baby/young-version language, "
     "described only as a cousin, unrelated spinoff, or separate meme with no stated tie to the "
     "target's own life stages, is weaker evidence and should generally be treated as not a "
@@ -195,16 +221,27 @@ def _verify_stages(stages, candidate_titles):
     """Defense in depth: even though the model is instructed to only copy from the candidate
     list, verify every returned title actually matches a real candidate (case-insensitive)
     before trusting it — a reworded name, a hallucination despite instructions, is dropped
-    rather than used. Each surviving stage's method/stone/reasoning is separately re-verified
+    rather than used. A candidate whose own content opens by describing it as a family member
+    OF a named character (FAMILY_RELATION_RE) is also rejected here, regardless of what the
+    model claimed — the same check the prompt now asks for, enforced in code rather than trusted
+    on the prompt alone. Each surviving stage's method/stone/reasoning is separately re-verified
     via _verify_method_fields."""
     lookup = {title.strip().lower(): title for title in candidate_titles}
-    verified = []
+    resolved = []
     seen = set()
     for stage in stages:
         real_title = lookup.get(stage.title.strip().lower())
-        if not real_title or real_title in seen:
+        if real_title and real_title not in seen:
+            seen.add(real_title)
+            resolved.append((real_title, stage))
+
+    content_by_title = akinator_mode._content_for_titles([title for title, _ in resolved])
+
+    verified = []
+    for real_title, stage in resolved:
+        content = content_by_title.get(real_title, "")
+        if FAMILY_RELATION_RE.search(content[:FAMILY_RELATION_CHECK_WINDOW]):
             continue
-        seen.add(real_title)
         method, stone, reasoning = _verify_method_fields(stage.method, stage.stone, stage.reasoning)
         verified.append(StageSelection(title=real_title, method=method, stone=stone, reasoning=reasoning))
     return verified[:MAX_STAGES_PER_SIDE]
