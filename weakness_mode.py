@@ -21,11 +21,25 @@ calls determine_type(), computes the countering type via top_weak_type(), retrie
 candidates with rival_query() as the search string, then calls format_weakness_report() with
 whatever pick_rival() found. This module stays retrieval-agnostic — it never touches chroma_db
 itself.
+
+Also surfaces documented in-wiki RELATIONSHIPS — friends, enemies/rivals, and family — found via
+find_relationships(). This is pure code, pattern-matched directly against the character's own
+wiki prose (relationship_config.py's keyword lists), costing no extra Gemini call and carrying no
+hallucination risk: a relationship is only reported when the text right after a trigger phrase
+("friends with", "uncle of", ...) names a REAL wiki page, verified against akinator_mode.ALL_TITLES
+— the same "never invent, always verify against a real vocabulary" rule every other mode follows.
+A documented enemy/rival additionally gets a stated canon-rivalry damage-bonus stat
+(relationship_config.RIVALRY_DAMAGE_BONUS_PERCENT) — informational only, since this app has no
+live battle engine to actually apply it in a real fight.
 """
+
+import re
 
 from google.genai import types
 from pydantic import BaseModel
 
+import akinator_mode
+import relationship_config as rel_config
 import rpg_mode
 import rpg_types
 from content_policy import with_content_policy
@@ -120,7 +134,95 @@ def pick_rival(rival_metadatas, exclude_title):
     return None
 
 
-def format_weakness_report(character_name, defending_types, weak_type, rival_title):
+def _relationship_pattern(keywords, connectors):
+    keyword_alt = "|".join(re.escape(k) for k in keywords)
+    connector_alt = "|".join(connectors)
+    return re.compile(rf"(?i)\b(?:{keyword_alt})\s+(?:{connector_alt})\b")
+
+
+# family relations are always phrased "X of Y" in this wiki ("uncle of X", "children of X");
+# friend/enemy relations use "with" in every real example found, "of" kept too for robustness.
+FRIEND_RE = _relationship_pattern(rel_config.FRIEND_KEYWORDS, ["with", "of"])
+ENEMY_RE = _relationship_pattern(rel_config.ENEMY_KEYWORDS, ["with", "of"])
+FAMILY_RE = _relationship_pattern(rel_config.FAMILY_KEYWORDS, ["of"])
+RELATIONSHIP_PATTERNS = [("friend", FRIEND_RE), ("enemy", ENEMY_RE), ("family", FAMILY_RE)]
+
+
+def _find_title_in_window(window, exclude_title):
+    """Verifies a relationship match names a REAL wiki page — never trusts free text alone. Scans
+    akinator_mode.ALL_TITLES (already loaded once at startup) for any real title appearing as a
+    whole word/phrase in the short text window right after a relationship trigger, preferring
+    whichever real title starts EARLIEST in the window — i.e. the one immediately named by the
+    trigger phrase — since the window can span into an unrelated later sentence that happens to
+    also name a real (but irrelevant) character. Ties at the same start position prefer the
+    longer title (so e.g. 'Tralalero Tralala' wins over a shorter title that's a substring of
+    it)."""
+    exclude_lower = exclude_title.strip().lower()
+    window_lower = window.lower()
+    best_title, best_key = None, None
+    for title in akinator_mode.ALL_TITLES:
+        title_lower = title.strip().lower()
+        if title_lower == exclude_lower or title_lower not in window_lower:
+            continue
+        match = re.search(r"(?i)\b" + re.escape(title) + r"\b", window)
+        if not match:
+            continue
+        key = (match.start(), -len(title))
+        if best_key is None or key < best_key:
+            best_key, best_title = key, title
+    return best_title
+
+
+def find_relationships(character_name, content):
+    """Scans a character's own wiki content for documented friend/enemy/family relationships with
+    other REAL wiki characters. Pattern-matched directly against real wiki prose (no Gemini call,
+    so zero hallucination risk beyond the regex itself) — a relationship is only kept when the
+    text right after the trigger phrase actually names a real wiki page via _find_title_in_window,
+    never a guessed or partially-matched name. The search window is cut off at the first sentence
+    boundary (. ! ?) — a real find must be in the SAME clause as the trigger; without this, a typo
+    in the intended name (breaking the exact-title match) can let the lookup fall through to an
+    unrelated real name later in the window, and falsely attribute it as the relationship (found
+    on real wiki text: 'wife of Cappucino Assassino' — a misspelling of Cappuccino Assassino —
+    otherwise let a later, unrelated 'Ballerino Lololo' mention get reported as her family).
+    Returns {"friend": [...], "enemy": [...], "family": [...]}, each a list of real titles, capped
+    per type by MAX_PER_RELATIONSHIP_TYPE."""
+    window_text = (content or "")[:rel_config.RELATIONSHIP_CHECK_WINDOW]
+    found = {"friend": [], "enemy": [], "family": []}
+    seen = {"friend": set(), "enemy": set(), "family": set()}
+    for relation_type, pattern in RELATIONSHIP_PATTERNS:
+        for match in pattern.finditer(window_text):
+            if len(found[relation_type]) >= rel_config.MAX_PER_RELATIONSHIP_TYPE:
+                break
+            search_window = window_text[match.end():match.end() + rel_config.NAME_SEARCH_WINDOW]
+            sentence_end = re.search(r"[.!?]", search_window)
+            if sentence_end:
+                search_window = search_window[:sentence_end.start()]
+            other_title = _find_title_in_window(search_window, character_name)
+            if other_title and other_title not in seen[relation_type]:
+                seen[relation_type].add(other_title)
+                found[relation_type].append(other_title)
+    return found
+
+
+def format_relationships(relationships):
+    """Renders find_relationships()'s output as report lines. The enemy/rival line carries the
+    stated canon-rivalry damage bonus — see the module docstring for why that's informational
+    rather than a computed game mechanic."""
+    lines = []
+    if relationships.get("friend"):
+        lines.append(f"**Friends:** {', '.join(relationships['friend'])}")
+    if relationships.get("enemy"):
+        bonus = rel_config.RIVALRY_DAMAGE_BONUS_PERCENT
+        lines.append(
+            f"**Documented rivals:** {', '.join(relationships['enemy'])} "
+            f"(canon rivalry — +{bonus}% damage vs each, per the wiki's own lore)"
+        )
+    if relationships.get("family"):
+        lines.append(f"**Family:** {', '.join(relationships['family'])}")
+    return lines
+
+
+def format_weakness_report(character_name, defending_types, weak_type, rival_title, relationships=None):
     type_label = "/".join(defending_types)
     weak_to, resists, immune = [], [], []
     for attacking_type in rpg_types.POKEMON_TYPES:
@@ -146,4 +248,10 @@ def format_weakness_report(character_name, defending_types, weak_type, rival_tit
             )
         else:
             lines.append(f"No standout {weak_type}-themed rival found in the wiki.")
+
+    relationship_lines = format_relationships(relationships or {})
+    if relationship_lines:
+        lines.append("")
+        lines.extend(relationship_lines)
+
     return "\n".join(lines)
