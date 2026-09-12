@@ -383,7 +383,20 @@ def chat(request: ChatRequest):
             if weak_type:
                 _, rival_metadatas = retrieve_chunks(weakness_mode.rival_query(weak_type), top_k=5)
                 rival_title = weakness_mode.pick_rival(rival_metadatas, request.question)
-            answer = weakness_mode.format_weakness_report(request.question, types_result, weak_type, rival_title)
+
+            # Documented relationships (friends/enemies/family) are pattern-matched against the
+            # character's own FULL wiki page, not the RAG chunk(s) already retrieved above, which
+            # can be partial or drawn from an unrelated section — same reasoning Evolution Mode's
+            # _verify_stages uses for its own akinator_mode._content_for_titles lookup.
+            real_title = best_title_match(request.question, metadatas)
+            relationships = {}
+            if real_title:
+                own_content = akinator_mode._content_for_titles([real_title]).get(real_title, "")
+                relationships = weakness_mode.find_relationships(real_title, own_content)
+
+            answer = weakness_mode.format_weakness_report(
+                request.question, types_result, weak_type, rival_title, relationships
+            )
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
     if request.mode == "akinator":
