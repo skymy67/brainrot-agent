@@ -318,6 +318,8 @@
     <button type="button" data-mode="craft" role="radio" aria-checked="false">Craft Mode</button>
     <button type="button" data-mode="rarity" role="radio" aria-checked="false">Rarity Mode</button>
     <button type="button" data-mode="evolution" role="radio" aria-checked="false">Evolution Mode</button>
+    <button type="button" data-mode="starter" role="radio" aria-checked="false">Starter Mode</button>
+    <button type="button" data-mode="weakness" role="radio" aria-checked="false">Weakness Finder</button>
     <button type="button" data-mode="akinator" role="radio" aria-checked="false">Akinator Mode</button>
   </div>
 </header>
@@ -384,6 +386,16 @@
     evolution: {
       label: "Evolution",
       description: "Get a Pokémon-style evolution line (stage names + level requirements) built only from real characters that exist on the wiki.",
+      placeholder: "Enter a character name…",
+    },
+    starter: {
+      label: "Starter",
+      description: "Get a shortlist of real wiki characters suitable as game starters — only ones with a documented evolution/variant/family relationship, grouped loosely by theme. Optionally filter by type/theme, or leave blank for a well-rounded list.",
+      placeholder: "Optional: filter by type/theme, or leave blank…",
+    },
+    weakness: {
+      label: "Weakness",
+      description: "Get a character's Pokémon Type and its full weakness/resistance/immunity breakdown from the real type chart, plus a real wiki rival whose theme would counter it.",
       placeholder: "Enter a character name…",
     },
     akinator: {
@@ -663,10 +675,12 @@
   }
 
   // image is { base64, mimeType } | undefined — never present on a resumed request (see
-  // the note above selectedImage on why images aren't persisted for resume).
-  function askQuestion(question, mode, skipUserMessage, image) {
+  // the note above selectedImage on why images aren't persisted for resume). displayText
+  // defaults to question itself, but Starter Mode overrides it so an empty (no-filter)
+  // submission still shows a readable user-message bubble instead of a blank one.
+  function askQuestion(question, mode, skipUserMessage, image, displayText = question) {
     const body = { question, mode, image_base64: image?.base64, image_mime_type: image?.mimeType };
-    return performRequest(body, mode, question, skipUserMessage);
+    return performRequest(body, mode, displayText, skipUserMessage);
   }
 
   const AKINATOR_ANSWER_LABELS = {
@@ -695,7 +709,9 @@
     if (isSending) return;
 
     const question = inputEl.value.trim();
-    if (!question) return;
+    // Starter Mode's filter is optional — an empty submission means "no filter, give a
+    // well-rounded shortlist" rather than being blocked like every other mode's required name.
+    if (!question && currentMode !== "starter") return;
 
     isSending = true;
     inputEl.disabled = true;
@@ -709,7 +725,7 @@
     if (currentMode === "akinator") {
       sendAkinatorReveal(question);
     } else {
-      askQuestion(question, currentMode, false, image);
+      askQuestion(question, currentMode, false, image, question || "(no filter)");
     }
   });
 
