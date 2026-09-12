@@ -22,6 +22,8 @@ import craft_mode
 import evolution_mode
 import rarity_mode
 import rpg_mode
+import starter_mode
+import weakness_mode
 from content_policy import with_content_policy
 from gemini_retry import call_with_retry
 
@@ -349,6 +351,39 @@ def chat(request: ChatRequest):
         answer = handle_gemini_errors(
             lambda: craft_mode.build_recipe(gemini_client, request.question, context, image_bytes, image_mime_type)
         )
+        return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
+
+    if request.mode == "starter":
+        # No per-character RAG retrieval here — candidate narrowing works over the wiki's own
+        # Category: tags (already mined by akinator_mode.py at startup), not a chroma_db lookup,
+        # so there are no per-request "sources" to report. request.question doubles as an
+        # optional free-text type/theme filter (e.g. "fire") rather than a character name — an
+        # empty string means "no filter, give a well-rounded shortlist."
+        answer = handle_gemini_errors(
+            lambda: starter_mode.build_starter_shortlist(gemini_client, request.question)
+        )
+        return ChatResponse(answer=answer, sources=[])
+
+    if request.mode == "weakness":
+        documents, metadatas = retrieve_chunks(request.question)
+        context = "\n\n---\n\n".join(f"[{meta['title']}]\n{doc}" for doc, meta in zip(documents, metadatas))
+
+        types_result = handle_gemini_errors(
+            lambda: weakness_mode.determine_type(gemini_client, request.question, context)
+        )
+        if types_result is None:
+            answer = f"Couldn't determine {request.question}'s type — try asking again."
+        else:
+            # A second, separate RAG retrieval — only possible once the target's own type (and
+            # therefore which type would counter it) is known, so it can't happen in the same
+            # pass as the first retrieval above. Same "app.py owns retrieval" pattern already
+            # used for Evolution Mode's own multi-query candidate retrieval.
+            weak_type = weakness_mode.top_weak_type(types_result)
+            rival_title = None
+            if weak_type:
+                _, rival_metadatas = retrieve_chunks(weakness_mode.rival_query(weak_type), top_k=5)
+                rival_title = weakness_mode.pick_rival(rival_metadatas, request.question)
+            answer = weakness_mode.format_weakness_report(request.question, types_result, weak_type, rival_title)
         return ChatResponse(answer=answer, sources=dedupe_sources(metadatas))
 
     if request.mode == "akinator":
